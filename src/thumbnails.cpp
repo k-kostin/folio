@@ -342,13 +342,13 @@ bool Thumbnails::nativeStl(const QString &mime) const {
     return !m_stlHelper.isEmpty() && helper.isFile() && helper.isExecutable();
 }
 
-QString Thumbnails::providerKey(const QString &mime) const {
+QString Thumbnails::providerKey(const QString &mime, int pixels) const {
     const QString fallback = m_thumbnailers.value(mime);
     if (!nativeStl(mime)) return fallback;
     const QFileInfo helper(m_stlHelper);
-    // A newly installed/updated helper or fallback gets its turn after an earlier failure.
-    return QStringLiteral("stl-cpu-1:%1:%2:%3\n%4").arg(m_stlHelper)
-        .arg(helper.size()).arg(helper.lastModified().toMSecsSinceEpoch()).arg(fallback);
+    // A new helper, fallback or smaller size gets its turn after an earlier failure.
+    return QStringLiteral("stl-cpu-1:%1:%2:%3:%4\n%5").arg(m_stlHelper)
+        .arg(helper.size()).arg(helper.lastModified().toMSecsSinceEpoch()).arg(pixels).arg(fallback);
 }
 
 QString Thumbnails::cacheKey(const QString &path) {
@@ -402,7 +402,7 @@ QImage Thumbnails::load(const QString &path, const QString &mime, int size) cons
     const QString type = mime.endsWith("/*")
         ? QMimeDatabase().mimeTypeForFile(path, QMimeDatabase::MatchExtension).name()
         : mime;
-    const QString thumbnailer = providerKey(type);
+    const QString thumbnailer = providerKey(type, pixels);
     if (failedBefore(path, modified, thumbnailer))
         return {};
     // A file that cannot be read is not a broken one: nothing is tried, so nothing is remembered.

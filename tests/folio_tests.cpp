@@ -5933,6 +5933,23 @@ private slots:
         QVERIFY(QFile::exists(dir.filePath("cache/large/" + Thumbnails::cacheKey(path))));
     }
 
+    void thumbnailsDoNotReuseStlWorkRefusalAtASmallerSize()
+    {
+        QTemporaryDir dir;
+        QByteArray stl(80, ' ');
+        QDataStream stream(&stl, QIODevice::Append);
+        stream.setByteOrder(QDataStream::LittleEndian);
+        stream.setFloatingPointPrecision(QDataStream::SinglePrecision);
+        stream << quint32(100);
+        for (int i = 0; i < 100; ++i)
+            stream << 0.f << 0.f << 1.f << 0.f << 0.f << 0.f << 10.f << 0.f << 0.f << 0.f << 10.f << 0.f << quint16(0);
+        const QString part = dir.filePath("part.stl");
+        write(part, stl);
+        Thumbnails thumbnails(dir.filePath("cache"), {dir.filePath("no-thumbnailers")});
+        QVERIFY(thumbnails.load(part, "model/stl", 1024).isNull());
+        QCOMPARE(thumbnails.load(part, "model/stl", 128).size(), QSize(128,128));
+    }
+
     void thumbnailsPreferUserStlThenCpuThenSystem()
     {
         QTemporaryDir dir;

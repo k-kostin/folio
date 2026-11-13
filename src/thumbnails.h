@@ -51,7 +51,7 @@ private:
     QString cachePath(const QString &path, int size) const;
     QString failPath(const QString &path) const;
     bool nativeStl(const QString &mime) const;
-    QString providerKey(const QString &mime) const;
+    QString providerKey(const QString &mime, int pixels) const;
     // Sets `attempted` when Qt's reader or a thumbnailer could take the file.
     QImage generate(const QString &path, const QString &mime, int pixels, bool &attempted) const;
     // Both answer whether the program judged the file: one that could not start, or was stopped as Folio quit, has not.
