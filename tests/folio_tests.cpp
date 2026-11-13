@@ -5429,11 +5429,28 @@ private slots:
         QVERIFY(QTest::qWaitFor([&] {
             return QDir(dir.path()).entryList({"*.started"}, QDir::Files).size() == workers;
         }, 3000));
-        auto *warm = request(photo, "image/png");
-        QSignalSpy ready(warm, &QQuickImageResponse::finished);
-        QVERIFY(ready.wait(500)); // Renderers remain held until cleanup releases them.
-        std::unique_ptr<QQuickTextureFactory> texture(warm->textureFactory());
-        QVERIFY(texture);
+        // The engine observes completion even if a very fast cache hit
+        // finishes before requestImageResponse() returns to its caller.
+        class BorrowedProvider : public QQuickAsyncImageProvider {
+        public:
+            explicit BorrowedProvider(ThumbnailProvider *provider) : target(provider) {}
+            QQuickImageResponse *requestImageResponse(const QString &id, const QSize &size) override {
+                return target->requestImageResponse(id, size);
+            }
+            ThumbnailProvider *target;
+        };
+        QQmlEngine engine;
+        engine.addImageProvider("thumb", new BorrowedProvider(provider.get()));
+        QQmlComponent image(&engine);
+        image.setData("import QtQuick\nImage { asynchronous: true; cache: false }", QUrl());
+        QVERIFY2(image.isReady(), qPrintable(image.errorString()));
+        std::unique_ptr<QObject> warm(image.createWithInitialProperties({
+            {"source", QUrl("image://thumb/256/0/image%2Fpng/" + QUrl::toPercentEncoding(photo))}}));
+        QVERIFY(warm);
+        QTRY_COMPARE_WITH_TIMEOUT(warm->property("status").toInt(), 1, 500);
+        QVERIFY(warm->property("implicitWidth").toInt() > 0);
+        warm.reset(); // The forwarding provider must not outlive the real one.
+        engine.removeImageProvider("thumb");
         // Queued misses cancelled before a generator is available must finish
         // without starting a helper or marking the file as failed.
         const QString queued = dir.filePath("queued.mp4");
