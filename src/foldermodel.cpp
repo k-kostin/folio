@@ -431,11 +431,16 @@ void FolderModel::summarize(Entry &entry, bool showHidden) {
     }
 }
 
-int FolderModel::itemCount(const QString &folder, bool showHidden) {
+int FolderModel::itemCount(const QString &folder, bool showHidden, const std::function<bool()> &stop) {
+    if (stop && stop())
+        return -1;
     int count = 0;
-    for (QDirIterator it(folder, entryFilters(showHidden)); it.hasNext(); it.next())
+    for (QDirIterator it(folder, entryFilters(showHidden)); it.hasNext(); it.next()) {
+        if (stop && stop())
+            return -1;
         ++count;
-    return count;
+    }
+    return stop && stop() ? -1 : count;
 }
 
 void FolderModel::reload() {
@@ -527,10 +532,11 @@ void FolderModel::countFolders(quint64 generation) {
     watcher->setFuture(QtConcurrent::run([folders, showHidden, latest, generation]() mutable {
         // Overtaken (another folder, or a re-read), the counts would be
         // thrown away, so it stops instead of listing every subfolder.
+        const auto overtaken = [&] { return *latest != generation; };
         for (auto &folder : folders) {
-            if (*latest != generation)
+            if (overtaken())
                 break;
-            folder.second.itemCount = itemCount(folder.second.path, showHidden);
+            folder.second.itemCount = itemCount(folder.second.path, showHidden, overtaken);
         }
         return folders;
     }));
