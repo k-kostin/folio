@@ -5742,7 +5742,7 @@ private slots:
         QVERIFY(!FolderModel::toMap(FolderModel::Entry()).contains("peek"));
     }
 
-    void columnsOnlyReadFoldersNearTheViewport_data()
+    void columnsKeepRecentFoldersWithinABudget_data()
     {
         QTest::addColumn<bool>("mirrored");
         QTest::addColumn<int>("width");
@@ -5752,7 +5752,7 @@ private slots:
         QTest::newRow("narrow-mirrored") << true << 180;
     }
 
-    void columnsOnlyReadFoldersNearTheViewport()
+    void columnsKeepRecentFoldersWithinABudget()
     {
         QFETCH(bool, mirrored);
         QFETCH(int, width);
@@ -5834,6 +5834,16 @@ private slots:
         const auto scrollTo = [&](bool oldest) {
             flick->setProperty("contentX", oldest != mirrored ? 0 : flick->property("contentWidth").toDouble() - flick->width());
         };
+        const auto leaveOldest = [&] {
+            // Visit enough disjoint areas to really evict the root, rather
+            // than accidentally testing a watcher in a still-resident column.
+            for (const double fraction : {.25, .5, .75}) {
+                flick->setProperty("contentX", fraction * (flick->property("contentWidth").toDouble() - flick->width()));
+                QCoreApplication::processEvents();
+            }
+            scrollTo(false);
+        };
+        const auto modelLimit = [&] { return 2 * (qCeil(flick->width() / 261) + 3) + 2; };
         const auto visibleAncestorsLoaded = [&] {
             // Use actual Row geometry, independently of Loader's index formula.
             const QPointF viewport = flick->mapToItem(window->contentItem(), QPointF());
@@ -5857,13 +5867,60 @@ private slots:
             flick->setProperty("contentX", fraction * (totalWidth - flick->width()));
             QTRY_VERIFY(visibleAncestorsLoaded());
             QTRY_VERIFY(loaded());
-            QVERIFY(models().size() <= qCeil(flick->width() / 261) + 4);
+            QVERIFY(models().size() <= modelLimit());
             QCOMPARE(flick->property("contentWidth").toDouble(), totalWidth);
             QCOMPARE(backend.folder()->selectedPaths(), QStringList{path + "/last.txt"});
         }
         // Unloading and restoring a column keeps the user's vertical position.
         scrollTo(true);
         QTRY_VERIFY(loaded() && listFor(home.path()));
+        QPointer<FolderModel> warmModel = modelFor(listFor(home.path()));
+        QHash<QString, QPointer<FolderModel>> warmAreas;
+        const auto rememberArea = [&] {
+            const qreal left = flick->mapToItem(window->contentItem(), QPointF()).x();
+            for (auto *item : items()) {
+                auto *model = modelFor(item);
+                if (!model || model == backend.folder() || model->path().isEmpty()) continue;
+                const qreal x = item->mapToItem(window->contentItem(), QPointF()).x();
+                if (x + item->width() > left - 260 && x < left + flick->width() + 260)
+                    warmAreas.insert(model->path(), model);
+            }
+        };
+        rememberArea();
+        scrollTo(false);
+        QTRY_VERIFY(loaded());
+        QVERIFY2(listFor(home.path()) && modelFor(listFor(home.path())) == warmModel,
+                 "Switching between recent areas discarded the warm column");
+        rememberArea();
+        for (int jump = 0; jump < 8; ++jump) {
+            scrollTo(jump % 2 == 0);
+            QTRY_VERIFY(loaded() && visibleAncestorsLoaded());
+            for (const auto &model : warmAreas) {
+                QVERIFY(model);
+                QVERIFY(listFor(model->path()));
+                QCOMPARE(modelFor(listFor(model->path())), model.data());
+            }
+            QVERIFY(models().size() <= modelLimit());
+        }
+        // Retained but invisible models keep receiving settings and file changes.
+        write(home.filePath(".retained-hidden"), "x");
+        backend.folder()->setShowHidden(true);
+        backend.folder()->setSortMode("oldest");
+        QTRY_VERIFY(warmModel && !warmModel->loading() && warmModel->showHidden() && warmModel->sortMode() == "oldest"
+                    && warmModel->indexOf(".retained-hidden") >= 0);
+        write(home.filePath("language"), "de");
+        QTRY_COMPARE(translator.language(), QString("de"));
+        QTRY_VERIFY(warmModel && !warmModel->loading());
+        QVERIFY(listFor(home.path()) && modelFor(listFor(home.path())) == warmModel);
+        write(home.filePath("language"), "en");
+        QTRY_COMPARE(translator.language(), QString("en"));
+        backend.folder()->setShowHidden(false);
+        backend.folder()->setSortMode("name");
+        QVERIFY(QFile::remove(home.filePath(".retained-hidden")));
+        QTRY_VERIFY(loaded());
+        scrollTo(true);
+        QTRY_VERIFY(loaded() && listFor(home.path()));
+        QCOMPARE(modelFor(listFor(home.path())), warmModel.data());
         auto *first = listFor(home.path());
         first->setProperty("contentY", first->property("originY").toReal() + 400);
         const qreal saved = first->property("contentY").toReal();
@@ -5881,8 +5938,9 @@ private slots:
         QQmlExpression startDrag(qmlContext(dragRow), dragRow, "Drag.dragType = Drag.Internal; Drag.active = true");
         startDrag.evaluate();
         QVERIFY2(!startDrag.hasError(), qPrintable(startDrag.error().toString()));
-        scrollTo(false);
+        leaveOldest();
         QCoreApplication::processEvents();
+        QVERIFY(models().size() <= modelLimit() + 1);
         QVERIFY2(dragRow && oldModel && qmlContext(dragRow) && qmlContext(dragRow)->isValid() && listFor(home.path()), "Scrolling unloaded the active drag source");
         QQmlExpression stopDrag(qmlContext(dragRow), dragRow, "Drag.active = false");
         stopDrag.evaluate();
@@ -5934,7 +5992,7 @@ private slots:
         QTRY_VERIFY(loaded());
         QTRY_VERIFY(resettingDragRow.isNull());
         // Language changes while unloaded invalidate the remembered position.
-        scrollTo(false);
+        leaveOldest();
         QTRY_VERIFY(loaded() && !listFor(home.path()));
         write(home.filePath("language"), "de");
         QTRY_COMPARE(translator.language(), QString("de"));
@@ -5944,7 +6002,7 @@ private slots:
         listFor(home.path())->setProperty("contentY", 400);
         // Settings changed while unloaded invalidate a remembered scroll, so
         // the next folder in the trail is visible under the new ordering.
-        scrollTo(false);
+        leaveOldest();
         QTRY_VERIFY(loaded() && !listFor(home.path()));
         backend.folder()->setShowHidden(true);
         backend.folder()->setSortMode("modified");
@@ -5957,7 +6015,7 @@ private slots:
         QTRY_VERIFY(restored->property("contentY").toReal() < 32);
         // A folder can become much shorter while nobody watches it.
         restored->setProperty("contentY", restored->property("originY").toReal() + 400);
-        scrollTo(false);
+        leaveOldest();
         QTRY_VERIFY(loaded() && !listFor(home.path()));
         for (int i = 0; i < 128; ++i)
             QVERIFY(QFile::remove(home.filePath(QString("row%1.txt").arg(i, 3, 10, QChar('0')))));
@@ -6003,15 +6061,15 @@ private slots:
         QCOMPARE(modelFor(listFor(path + "/peek"))->rowCount(), 1);
         backend.navigate(path + "/peek");
         QTRY_VERIFY(loaded() && visibleAncestorsLoaded());
-        QVERIFY(models().size() <= 6);
+        QVERIFY(models().size() <= modelLimit());
         backend.navigate(path);
         QTRY_VERIFY(loaded());
         window->setWidth(1307);
         QTRY_VERIFY(loaded());
-        QVERIFY(models().size() <= 9);
+        QVERIFY(models().size() <= modelLimit());
         window->setWidth(width);
         QTRY_VERIFY(loaded());
-        QVERIFY(models().size() <= 6);
+        QVERIFY(models().size() <= modelLimit());
         backend.navigate(home.filePath("step"));
         columns->setProperty("currentIndex", -1);
         window->setWidth(1307);
@@ -6046,6 +6104,8 @@ private slots:
         // The cache predates the new next child. An early empty reveal must
         // not turn the automatic position into a saved zero before loaded.
         backend.navigate(path);
+        QTRY_VERIFY(loaded());
+        leaveOldest();
         QTRY_VERIFY(loaded() && !listFor(home.path()));
         QVERIFY(QDir().mkdir(home.filePath("zz-new")));
         backend.navigate(home.filePath("zz-new"));
