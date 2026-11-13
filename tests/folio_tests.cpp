@@ -5961,22 +5961,30 @@ private slots:
     void thumbnailsCancelHelpersWithoutRememberingFailure_data()
     {
         QTest::addColumn<bool>("pdf");
-        QTest::newRow("installed-thumbnailer") << false;
-        QTest::newRow("pdf-fallback") << true;
+        QTest::addColumn<bool>("installedPdf");
+        QTest::newRow("installed-thumbnailer") << false << false;
+        QTest::newRow("pdf-fallback") << true << false;
+        QTest::newRow("installed-pdf-thumbnailer") << true << true;
     }
 
     void thumbnailsCancelHelpersWithoutRememberingFailure()
     {
         QFETCH(bool, pdf);
+        QFETCH(bool, installedPdf);
         QTemporaryDir dir;
-        const QString script = dir.filePath(pdf ? "pdftoppm" : "render"), file = dir.filePath("clip");
+        const QString script = dir.filePath(pdf && !installedPdf ? "pdftoppm" : "render"), file = dir.filePath("clip");
         QImage frame(64, 32, QImage::Format_RGB32);
         frame.fill(Qt::green);
         QVERIFY(frame.save(file, "PNG"));
         write(script, "#!/bin/sh\n/bin/sleep 300 &\necho $! > \"$0.helper\"\necho $$ > \"$0.pid\"\nwait\n");
         QVERIFY(QFile::setPermissions(script, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         write(dir.filePath("test.thumbnailer"), "[Thumbnailer Entry]\nExec=/bin/sh \""
-              + script.toUtf8() + "\" %i %o\nMimeType=video/mp4;\n");
+              + script.toUtf8() + "\" %i %o\nMimeType=" + (installedPdf ? "application/pdf" : "video/mp4") + ";\n");
+        if (installedPdf) {
+            // Cancelling a PDF's installed thumbnailer must not start its fallback.
+            write(dir.filePath("pdftoppm"), "#!/bin/sh\nprintf run > \"$0.ran\"\nexit 1\n");
+            QVERIFY(QFile::setPermissions(dir.filePath("pdftoppm"), QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        }
         const QByteArray oldPath = qgetenv("PATH");
         const auto restore = qScopeGuard([&] { qputenv("PATH", oldPath); });
         qputenv("PATH", QFile::encodeName(dir.path()));
@@ -5998,9 +6006,10 @@ private slots:
         }
         QVERIFY(!QFile::exists(dir.filePath("cache/" + Thumbnails::failures + "/" + Thumbnails::cacheKey(file))));
         QVERIFY(!QFile::exists(dir.filePath("cache/normal/" + Thumbnails::cacheKey(file))));
+        QVERIFY(!QFile::exists(dir.filePath("pdftoppm.ran")));
 
         // The same unmodified file is tried again, without changing its thumbnailer's command or its cache.
-        write(script, pdf ? "#!/bin/sh\nfor output do :; done\n/bin/cp \"" + file.toUtf8() + "\" \"$output.png\"\n"
+        write(script, pdf && !installedPdf ? "#!/bin/sh\nfor output do :; done\n/bin/cp \"" + file.toUtf8() + "\" \"$output.png\"\n"
                           : "#!/bin/sh\n/bin/cp \"$1\" \"$2\"\n");
         cancelled = false;
         QCOMPARE(thumbnails.load(file, mime, 128, &cancelled).size(), QSize(64, 32));

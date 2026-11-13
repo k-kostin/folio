@@ -26,8 +26,8 @@ public:
                         int patience = 15000);
 
     // Returns a thumbnail no larger than `size` on its longest side, from the
-    // cache when it is fresh, or a null image when none can be made. A cancelled
-    // request stops its helper and never records a thumbnail or a failure.
+    // cache when it is fresh, or a null image when none can be made. Observing
+    // cancellation stops the helper without recording a thumbnail or a failure.
     QImage load(const QString &path, const QString &mime, int size,
                 const std::atomic_bool *cancelled = nullptr) const;
     // Stops the thumbnailers still running and starts no more, as Folio quits: it waits for every thumbnail being made,
