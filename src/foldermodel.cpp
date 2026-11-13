@@ -435,10 +435,16 @@ int FolderModel::itemCount(const QString &folder, bool showHidden, const std::fu
     if (stop && stop())
         return -1;
     int count = 0;
-    for (QDirIterator it(folder, entryFilters(showHidden)); it.hasNext(); it.next()) {
+    // Let hidden entries through too: filtering a long run inside Qt would
+    // give this loop no chance to notice cancellation. On Linux a dot name
+    // is hidden, as in listRecent(). The iterator still excludes . and ...
+    QDirIterator it(folder, entryFilters(true));
+    while (it.hasNext()) {
         if (stop && stop())
             return -1;
-        ++count;
+        it.next();
+        if (showHidden || !it.fileName().startsWith('.'))
+            ++count;
     }
     return stop && stop() ? -1 : count;
 }

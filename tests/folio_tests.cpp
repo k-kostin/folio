@@ -579,6 +579,15 @@ private slots:
         QCOMPARE(FolderModel::itemCount(empty.path(), false, [] { return true; }), -1);
         QCOMPARE(FolderModel::itemCount(dir.path(), true, [] { return true; }), -1);
         QCOMPARE(FolderModel::itemCount(empty.path(), false), 0);
+
+        // Hidden entries still take work to enumerate, even when not counted.
+        QTemporaryDir hidden;
+        for (int i = 0; i < 64; ++i)
+            write(hidden.filePath("." + QString::number(i) + ".txt"), "x");
+        checks = 0;
+        QCOMPARE(FolderModel::itemCount(hidden.path(), false, [&] { return ++checks >= 4; }), -1);
+        QCOMPARE(FolderModel::itemCount(hidden.path(), false), 0);
+        QCOMPARE(FolderModel::itemCount(hidden.path(), true), 64);
     }
 
     void folderModelLoadsInTheBackground()
