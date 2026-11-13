@@ -180,11 +180,16 @@ Item {
         enabled: !row.pooled
         onHoveredChanged: if (hovered) row.captureDragPicture()
     }
-    TapHandler {
-        id: tap
-        enabled: !row.pooled
-        onTapped: row.clicked(tap.point.modifiers)
-        onDoubleTapped: row.activated()
+    // A TapHandler remembers the previous tap even when disabled. A reused
+    // row must not join clicks on two different files into a double click.
+    Loader {
+        active: !row.pooled
+        sourceComponent: TapHandler {
+            id: tap
+            parent: row
+            onTapped: row.clicked(tap.point.modifiers)
+            onDoubleTapped: row.activated()
+        }
     }
 
     // Like the tiles: dragged, a row is a file for the sidebar or another app.
