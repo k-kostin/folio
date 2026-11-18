@@ -7368,7 +7368,7 @@ private slots:
         QVERIFY(frame.save(dir.filePath("frame.png")));
         // One slow thumbnail per worker, like leaving a folder whose visible tiles are still loading.
         write(dir.filePath("render"), "#!/bin/sh\nprintf started > \"$1.started\"\n"
-              "case \"$1\" in *slow*) exec /usr/bin/sleep 2.5;; esac\ncp \""
+              "case \"${1##*/}\" in slow*.mp4) exec /usr/bin/sleep 2.5;; esac\ncp \""
               + dir.filePath("frame.png").toUtf8() + "\" \"$2\"\n");
         write(dir.filePath("test.thumbnailer"), "[Thumbnailer Entry]\nExec=/bin/sh \""
               + dir.filePath("render").toUtf8() + "\" %i %o\nMimeType=video/mp4;\n");
@@ -7385,6 +7385,7 @@ private slots:
             };
             QList<QObject *> images;
             const auto clear = qScopeGuard([&] { qDeleteAll(images); });
+            // Fill every slot in ThumbnailProvider's bounded pool.
             const int workers = qBound(2, QThread::idealThreadCount() / 2, 6);
             for (int i = 0; i < workers; ++i) {
                 const QString path = dir.filePath("slow" + QString::number(i) + ".mp4");
