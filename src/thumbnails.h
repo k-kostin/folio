@@ -26,11 +26,11 @@ public:
 
     // Returns a thumbnail no larger than `size` on its longest side, from the
     // cache when it is fresh, or a null image when none can be made.
-    QImage load(const QString &path, const QString &mime, int size) const;
+    QImage load(const QString &path, const QString &mime, int size, const std::atomic_bool *cancelled = nullptr) const;
     // Like load(), but defers writing the cache or failure marker so the
     // provider can hand the pixels to QML before encoding PNG to disk.
     QImage loadNow(const QString &path, const QString &mime, int size, bool *fresh, bool *failed,
-                   QDateTime *modified) const;
+                   QDateTime *modified, const std::atomic_bool *cancelled = nullptr) const;
     void remember(QImage image, const QString &path, int size, const QDateTime &modified) const;
     void rememberFailure(const QString &path, const QDateTime &modified) const;
 
@@ -45,7 +45,7 @@ public:
     // now, for keep() to cache, dated `modified`: the picture's time as it
     // was before its pixels were read, so one saved over meanwhile is made
     // again rather than kept old under its new time.
-    QImage sharp(const QString &path, const QString &mime, int pixels, bool *fresh, QDateTime *modified) const;
+    QImage sharp(const QString &path, const QString &mime, int pixels, bool *fresh, QDateTime *modified, const std::atomic_bool *cancelled = nullptr) const;
     void keep(const QImage &image, const QString &path, int pixels, const QDateTime &modified) const;
 
     static QString cacheKey(const QString &path);
@@ -61,9 +61,9 @@ private:
     QString failPath(const QString &key) const;
     QString sharpPath(const QString &stem, int pixels, bool alpha) const;
     // Sets `attempted` when Qt's reader or a thumbnailer could take the file.
-    QImage generate(const QString &path, const QString &mime, int pixels, bool &attempted) const;
-    QImage runThumbnailer(const QString &command, const QString &path, int pixels) const;
-    static QImage pdfPage(const QString &path, int pixels, int patience);
+    QImage generate(const QString &path, const QString &mime, int pixels, bool &attempted, const std::atomic_bool *cancelled) const;
+    QImage runThumbnailer(const QString &command, const QString &path, int pixels, const std::atomic_bool *cancelled) const;
+    static QImage pdfPage(const QString &path, int pixels, int patience, const std::atomic_bool *cancelled);
     bool failedBefore(const QString &key, const QDateTime &modified) const;
     void save(QImage image, const QString &target, const QString &path, const QDateTime &modified) const;
     static bool madeFor(const QImage &image, const QDateTime &modified);

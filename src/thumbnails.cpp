@@ -6,6 +6,7 @@
 #include <QCryptographicHash>
 #include <QtEndian>
 #include <zlib.h>
+#include <QDeadlineTimer>
 #include <QDir>
 #include <QFont>
 #include <QFontMetricsF>
@@ -117,10 +118,27 @@ QStringList expandCommand(const QString &command, const QString &input, const QS
 // group of its own, so that past `patience` milliseconds what it started
 // (glycin and the office thumbnailer start their own) is stopped with it:
 // a broken file must never hang a tile forever.
-bool run(QProcess &process, const QString &program, const QStringList &args, int patience) {
+bool isCancelled(const std::atomic_bool *cancelled) {
+    return cancelled && *cancelled;
+}
+
+bool run(QProcess &process, const QString &program, const QStringList &args, int patience,
+         const std::atomic_bool *cancelled) {
+    if (isCancelled(cancelled))
+        return false;
     process.setChildProcessModifier([] { ::setpgid(0, 0); });
     process.start(program, args);
-    if (!process.waitForFinished(patience)) {
+    QDeadlineTimer deadline(patience);
+    bool finished = false;
+    while (!isCancelled(cancelled) && !deadline.hasExpired()) {
+        if (process.waitForFinished(int(qMin<qint64>(100, deadline.remainingTime())))) {
+            finished = true;
+            break;
+        }
+        if (process.state() == QProcess::NotRunning)
+            break;
+    }
+    if (!finished || isCancelled(cancelled)) {
         if (process.processId() > 0)
             ::kill(-pid_t(process.processId()), SIGKILL);
         process.waitForFinished(1000);
@@ -234,8 +252,10 @@ QString Thumbnails::sharpPath(const QString &stem, int pixels, bool alpha) const
     return m_sharpRoot + QString::number(pixels) + "/" + stem + (alpha ? ".png" : ".jpg");
 }
 
-QImage Thumbnails::sharp(const QString &path, const QString &mime, int pixels, bool *fresh, QDateTime *read) const {
+QImage Thumbnails::sharp(const QString &path, const QString &mime, int pixels, bool *fresh, QDateTime *read, const std::atomic_bool *cancelled) const {
     *fresh = false;
+    if (isCancelled(cancelled))
+        return {};
     const QFileInfo info(path);
     if (!info.isFile())
         return {};
@@ -252,7 +272,7 @@ QImage Thumbnails::sharp(const QString &path, const QString &mime, int pixels, b
     QImageReader reader(path);
     reader.setAutoTransform(true);
     if (!reader.canRead())
-        return load(path, mime, 1024);
+        return load(path, mime, 1024, cancelled);
     const QSize full = reader.size();
     // Small enough already: read as it is, quickly, and not kept.
     const bool small = full.isValid() && full.width() <= pixels && full.height() <= pixels;
@@ -260,7 +280,7 @@ QImage Thumbnails::sharp(const QString &path, const QString &mime, int pixels, b
         reader.setScaledSize(full.scaled(pixels, pixels, Qt::KeepAspectRatio));
     const QImage image = reader.read();
     if (image.isNull())
-        return load(path, mime, 1024);
+        return load(path, mime, 1024, cancelled);
     *fresh = !small;
     return image;
 }
@@ -310,9 +330,11 @@ QImage Thumbnails::cached(const QString &path) const {
 }
 
 QImage Thumbnails::loadNow(const QString &path, const QString &mime, int size, bool *fresh, bool *failed,
-                           QDateTime *modifiedOut) const {
+                           QDateTime *modifiedOut, const std::atomic_bool *cancelled) const {
     *fresh = false;
     *failed = false;
+    if (isCancelled(cancelled))
+        return {};
     const QFileInfo info(path);
     if (!info.isFile())
         return {};
@@ -338,7 +360,9 @@ QImage Thumbnails::loadNow(const QString &path, const QString &mime, int size, b
     const QString type = FolderModel::typeByContent(path, named);
     const int pixels = bucketPixels(bucketFor(size));
     bool attempted = false;
-    QImage image = generate(path, type, pixels, attempted);
+    QImage image = generate(path, type, pixels, attempted, cancelled);
+    if (isCancelled(cancelled))
+        return {};
     if (image.isNull()) {
         // Only a reader or thumbnailer that ran and failed is remembered, so
         // one installed later still gets its turn.
@@ -351,10 +375,12 @@ QImage Thumbnails::loadNow(const QString &path, const QString &mime, int size, b
     return image;
 }
 
-QImage Thumbnails::load(const QString &path, const QString &mime, int size) const {
+QImage Thumbnails::load(const QString &path, const QString &mime, int size, const std::atomic_bool *cancelled) const {
     bool fresh = false, failed = false;
     QDateTime modified;
-    const QImage image = loadNow(path, mime, size, &fresh, &failed, &modified);
+    const QImage image = loadNow(path, mime, size, &fresh, &failed, &modified, cancelled);
+    if (isCancelled(cancelled))
+        return {};
     if (fresh)
         remember(image, path, size, modified);
     else if (failed)
@@ -362,7 +388,9 @@ QImage Thumbnails::load(const QString &path, const QString &mime, int size) cons
     return image;
 }
 
-QImage Thumbnails::generate(const QString &path, const QString &mime, int pixels, bool &attempted) const {
+QImage Thumbnails::generate(const QString &path, const QString &mime, int pixels, bool &attempted, const std::atomic_bool *cancelled) const {
+    if (isCancelled(cancelled))
+        return {};
     // Common photo formats decode fastest in-process; anything Qt can't read
     // (HEIC, JPEG XL) falls through to the installed thumbnailers.
     if (mime.startsWith("image/")) {
@@ -381,7 +409,7 @@ QImage Thumbnails::generate(const QString &path, const QString &mime, int pixels
     const QString command = thumbnailerFor(mime);
     if (!command.isEmpty()) {
         attempted = true;
-        return runThumbnailer(command, path, pixels);
+        return runThumbnailer(command, path, pixels, cancelled);
     }
     // Without a PDF thumbnailer installed, Poppler's pdftoppm (there with
     // CUPS) draws the first page. Cache a found path (verifying it still
@@ -398,7 +426,7 @@ QImage Thumbnails::generate(const QString &path, const QString &mime, int pixels
         }
         if (!executable.isEmpty()) {
             attempted = true;
-            return pdfPage(path, pixels, m_patience);
+            return pdfPage(path, pixels, m_patience, cancelled);
         }
     }
     return {};
@@ -464,18 +492,18 @@ QImage Thumbnails::textPage(const QString &path, int pixels, const QColor &paper
     return page;
 }
 
-QImage Thumbnails::pdfPage(const QString &path, int pixels, int patience) {
+QImage Thumbnails::pdfPage(const QString &path, int pixels, int patience, const std::atomic_bool *cancelled) {
     QTemporaryDir scratch;
     if (!scratch.isValid())
         return {};
     QProcess process;
     if (!run(process, "pdftoppm", {"-f", "1", "-l", "1", "-singlefile", "-png", "-scale-to",
-                                   QString::number(pixels), path, scratch.filePath("page")}, patience))
+                                   QString::number(pixels), path, scratch.filePath("page")}, patience, cancelled))
         return {};
     return QImage(scratch.filePath("page.png"));
 }
 
-QImage Thumbnails::runThumbnailer(const QString &command, const QString &path, int pixels) const {
+QImage Thumbnails::runThumbnailer(const QString &command, const QString &path, int pixels, const std::atomic_bool *cancelled) const {
     QTemporaryDir scratch;
     if (!scratch.isValid())
         return {};
@@ -502,7 +530,7 @@ QImage Thumbnails::runThumbnailer(const QString &command, const QString &path, i
 
     QProcess process;
     process.setProcessChannelMode(QProcess::ForwardedErrorChannel);
-    if (!run(process, program, args, m_patience))
+    if (!run(process, program, args, m_patience, cancelled))
         return {};
     return QImage(output);
 }
@@ -623,7 +651,11 @@ public:
             const QString path = QUrl::fromPercentEncoding(parts.mid(4).join('/').toUtf8());
             bool fresh = false;
             QDateTime modified;
-            m_image = m_thumbnails->sharp(path, mime, pixels, &fresh, &modified);
+            m_image = m_thumbnails->sharp(path, mime, pixels, &fresh, &modified, &m_cancelled);
+            if (m_cancelled) {
+                m_image = {};
+                fresh = false;
+            }
             // Shown first, kept after: writing it shouldn't hold it up. Qt
             // may delete the response once it's finished, so nothing of it
             // is used after.
@@ -646,7 +678,12 @@ public:
             const QString path = QUrl::fromPercentEncoding(parts.mid(3).join('/').toUtf8());
             bool fresh = false, failed = false;
             QDateTime modified;
-            m_image = m_thumbnails->loadNow(path, mime, size, &fresh, &failed, &modified);
+            m_image = m_thumbnails->loadNow(path, mime, size, &fresh, &failed, &modified, &m_cancelled);
+            if (m_cancelled) {
+                m_image = {};
+                fresh = false;
+                failed = false;
+            }
             // Shown first, written to the PNG cache after so tiles never wait
             // on PNG encoding and disk sync. Nothing of `this` is touched once
             // finished() is emitted.
