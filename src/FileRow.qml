@@ -128,10 +128,13 @@ Item {
             }
             HoverHandler { id: arrowHover; enabled: !row.pooled && row.isDir }
             TapHandler {
+                property string pressedPath: ""
                 enabled: !row.pooled && row.isDir
+                onPressedChanged: if (pressed) pressedPath = row.path
+                onEnabledChanged: if (!enabled) pressedPath = ""
                 // Before the row's own tap, which would select it instead.
                 grabPermissions: PointerHandler.CanTakeOverFromAnything
-                onTapped: row.toggled()
+                onTapped: if (pressedPath.length > 0 && pressedPath === row.path) row.toggled()
             }
         }
 
