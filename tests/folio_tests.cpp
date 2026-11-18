@@ -678,6 +678,144 @@ private slots:
         QTRY_COMPARE(orders(), expected);
     }
 
+    void columnsLoadAncestorsWhenFirstShown_data()
+    {
+        QTest::addColumn<bool>("mirrored");
+        QTest::newRow("ltr") << false;
+        QTest::newRow("rtl") << true;
+    }
+
+    void columnsLoadAncestorsWhenFirstShown()
+    {
+        QFETCH(bool, mirrored);
+        QTemporaryDir home, outside;
+        QVERIFY(home.isValid());
+        QVERIFY(outside.isValid());
+        for (int i = 0; i < 40; ++i)
+            QVERIFY(QDir().mkpath(home.filePath("ahead" + QString::number(i))));
+        QString deep = home.path();
+        for (int depth = 0; depth < 8; ++depth) {
+            deep += "/step";
+            QVERIFY(QDir().mkpath(deep));
+        }
+        write(deep + "/last.txt", "x");
+        Backend backend(home.path());
+        Theme theme(home.filePath("theme"));
+        FileOps fileOps;
+        Translator translator(home.filePath("language"), home.path());
+        Thumbnails thumbnails(home.filePath("cache"), {home.filePath("none")});
+        qmlRegisterType<FolderModel>("Folio", 1, 0, "FolderModel");
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("fileOps", &fileOps);
+        engine.rootContext()->setContextProperty("translator", &translator);
+        engine.rootContext()->setContextProperty("plugins", QVariantMap{{"views", QVariantMap{}}});
+        engine.addImageProvider("thumb", new ThumbnailProvider(&thumbnails));
+        QQmlComponent component(&engine);
+        component.setData(R"(
+            import QtQuick
+            Window {
+                property bool mirrored
+                width: 783; height: 480; visible: true
+                Item {
+                    anchors.fill: parent
+                    LayoutMirroring.enabled: mirrored
+                    LayoutMirroring.childrenInherit: true
+                    FolderColumns { id: columns; anchors.fill: parent }
+                }
+                function pick(path) { columns.startAt(path) }
+                function oldest() {
+                    const flick = columns.children[columns.children.length - 1]
+                    flick.contentX = mirrored ? flick.contentWidth - flick.width : 0
+                }
+                function newest() { columns.revealEnd() }
+            }
+        )", QUrl::fromLocalFile(sourceFolder() + "/ColumnsLazyTest.qml"));
+        std::unique_ptr<QObject> root(component.createWithInitialProperties({{"mirrored", mirrored}}));
+        QVERIFY2(root, qPrintable(component.errorString()));
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        const auto lists = [&] {
+            QMap<QString, QQuickItem *> found;
+            std::function<void(QQuickItem *)> walk = [&](QQuickItem *item) {
+                auto *model = qobject_cast<FolderModel *>(item->property("model").value<QObject *>());
+                if (model && !model->path().isEmpty())
+                    found.insert(model->path(), item);
+                for (auto *child : item->childItems()) walk(child);
+            };
+            walk(window->contentItem());
+            return found;
+        };
+        // Pick a deep place as the sidebar does: ancestors start hidden.
+        QMetaObject::invokeMethod(root.get(), "pick", Q_ARG(QVariant, deep));
+        backend.navigate(deep);
+        QTRY_COMPARE(backend.folder()->count(), 1);
+        QTRY_VERIFY(lists().size() >= 2);
+        QVERIFY2(lists().size() <= 3, "hidden ancestors must not create models");
+        QVERIFY(!lists().contains(home.path()));
+        write(home.filePath("late.txt"), "fresh");
+        QMetaObject::invokeMethod(root.get(), "oldest");
+        QTRY_VERIFY(lists().contains(home.path()));
+        auto *column = lists().value(home.path());
+        auto *model = qobject_cast<FolderModel *>(column->property("model").value<QObject *>());
+        QTRY_VERIFY(model->indexOf("late.txt") >= 0);
+        QTRY_VERIFY(column->property("contentHeight").toReal() > 800);
+        const auto highlighted = [&] {
+            bool found = false;
+            std::function<void(QQuickItem *)> walk = [&](QQuickItem *item) {
+                if (item->property("path").toString() == home.filePath("step") && item->property("trail").toBool()) {
+                    const qreal y = item->mapToItem(column, QPointF()).y();
+                    found = y >= 0 && y + item->height() <= column->height();
+                }
+                for (auto *child : item->childItems()) walk(child);
+            };
+            walk(column);
+            return found;
+        };
+        QTRY_VERIFY(highlighted());
+        column->setProperty("contentY", 300.0);
+        const qreal scroll = column->property("contentY").toReal();
+        QMetaObject::invokeMethod(root.get(), "newest");
+        const auto offscreen = [&] {
+            const qreal x = column->mapToItem(window->contentItem(), QPointF()).x();
+            return x + column->width() <= 0 || x >= window->width();
+        };
+        QTRY_VERIFY(offscreen());
+        QMetaObject::invokeMethod(root.get(), "oldest");
+        QTRY_VERIFY(!offscreen());
+        QTRY_COMPARE(lists().value(home.path()), column);
+        QCOMPARE(column->property("contentY").toReal(), scroll);
+        // The real drop handler still targets this ancestor after revealing it.
+        const QString parcel = outside.filePath("parcel.txt");
+        write(parcel, "parcel");
+        QMimeData data;
+        data.setUrls({QUrl::fromLocalFile(parcel)});
+        // A file row lets the column handle the drop; a folder row would
+        // correctly drop into that child instead.
+        column->setProperty("contentY", column->property("contentHeight").toReal() - column->height());
+        QQuickItem *fileRow = nullptr;
+        const auto findFile = [&] {
+            fileRow = nullptr;
+            std::function<void(QQuickItem *)> walk = [&](QQuickItem *item) {
+                if (item->property("path").toString() == home.filePath("late.txt")) fileRow = item;
+                for (auto *child : item->childItems()) walk(child);
+            };
+            walk(column);
+            if (!fileRow) return false;
+            const qreal y = fileRow->mapToItem(column, QPointF()).y();
+            return y >= 0 && y + fileRow->height() <= column->height();
+        };
+        QTRY_VERIFY(findFile());
+        const QPointF at = fileRow->mapToItem(window->contentItem(), QPointF(100, fileRow->height() / 2));
+        QDragEnterEvent enter(at, Qt::MoveAction, &data, Qt::LeftButton, Qt::NoModifier);
+        QGuiApplication::sendEvent(window, &enter);
+        QDropEvent drop(at, Qt::MoveAction, &data, Qt::LeftButton, Qt::NoModifier);
+        QGuiApplication::sendEvent(window, &drop);
+        QVERIFY(drop.isAccepted());
+        QTRY_VERIFY(QFileInfo::exists(home.filePath("parcel.txt")));
+    }
+
     // A place picked in the sidebar is the first column shown, with the
     // folders above it scrolled out of sight to the left; going up shows
     // them again.

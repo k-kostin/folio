@@ -75,6 +75,19 @@ Item {
     Component.onCompleted: syncTrail()
     readonly property var selected: here.currentIndex >= 0 ? (backend.folder.count, backend.folder.get(here.currentIndex)) : ({})
 
+    // A hidden ancestor needs no listing until it is near the viewport.
+    // Once shown, keep its model and scroll position just as before.
+    function loadColumns() {
+        row.forceLayout()
+        for (let i = 0; i < ancestors.count; ++i) {
+            const column = ancestors.itemAt(i)
+            if (!column) continue
+            const x = column.mapToItem(flick, 0, 0).x
+            if (x + column.width > -columnWidth && x < flick.width + columnWidth)
+                column.shown = true
+        }
+    }
+
     // Where the first column shown starts, from the side the columns grow
     // from: past the hidden ones and their separators.
     readonly property int hiddenWidth: hidden * (columnWidth + 1)
@@ -84,6 +97,7 @@ Item {
         const from = Math.max(view.hiddenWidth, row.width - flick.width)
         const most = Math.max(0, flick.contentWidth - flick.width)
         flick.contentX = view.LayoutMirroring.enabled ? most - from : from
+        Qt.callLater(view.loadColumns)
     }
     LayoutMirroring.onEnabledChanged: revealEnd()
     function enter() {
@@ -107,6 +121,7 @@ Item {
         contentWidth: Math.max(width, row.width, view.hiddenWidth + width)
         contentHeight: height
         boundsBehavior: Flickable.StopAtBounds
+        onContentXChanged: Qt.callLater(view.loadColumns)
         onContentWidthChanged: view.revealEnd()
         onWidthChanged: view.revealEnd()
         ScrollBar.horizontal: FolioScrollBar { }
@@ -120,37 +135,46 @@ Item {
 
             // The folders on the way here, each showing which way the trail goes.
             Repeater {
+                id: ancestors
                 model: trail
+                onItemAdded: Qt.callLater(view.loadColumns)
                 Row {
                     id: ancestor
                     required property string path
                     required property string next
+                    property bool shown: false
                     height: row.height
 
                     FileListView {
                         id: column
                         width: view.columnWidth
                         height: parent.height
-                        model: FolderModel {
-                            id: folder
-                            path: ancestor.path
-                            showHidden: backend.folder.showHidden
-                            sortMode: { backend.sortsRevision; return backend.sortOf(ancestor.path) }
-                            filter: backend.folder.filter
-                            onLoaded: column.revealNext()
+                        model: folderLoader.item
+                        Loader {
+                            id: folderLoader
+                            visible: false
+                            active: ancestor.shown
+                            onLoaded: Qt.callLater(column.revealNext)
+                            sourceComponent: FolderModel {
+                                path: ancestor.path
+                                showHidden: backend.folder.showHidden
+                                sortMode: { backend.sortsRevision; return backend.sortOf(ancestor.path) }
+                                filter: backend.folder.filter
+                                onLoaded: column.revealNext()
+                            }
                         }
                         // Names sort by the language's alphabet.
                         Connections {
                             target: translator
-                            function onChanged() { folder.reload() }
+                            function onChanged() { if (column.model) column.model.reload() }
                         }
-                        function revealNext() { positionViewAtIndex(Math.max(0, folder.indexOf(ancestor.next)), ListView.Contain) }
+                        function revealNext() { if (model) positionViewAtIndex(Math.max(0, model.indexOf(ancestor.next)), ListView.Contain) }
                         ColumnDrop { items: column; folder: ancestor.path }
                         TapHandler {
                             acceptedButtons: Qt.RightButton
                             onTapped: (point) => {
                                 const index = column.indexAt(point.position.x, point.position.y)
-                                view.contextMenu(index >= 0 ? folder.get(index) : null, ancestor.path, point.scenePosition)
+                                view.contextMenu(index >= 0 ? column.model.get(index) : null, ancestor.path, point.scenePosition)
                             }
                         }
                         Connections {
