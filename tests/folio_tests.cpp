@@ -569,6 +569,7 @@ private slots:
                 Rectangle { objectName: "red"; width: 24; height: 24; color: "red" }
                 Rectangle { objectName: "green"; x: 32; width: 24; height: 24; color: "lime" }
                 Image { objectName: "preview"; x: 96; width: 24; height: 24; source: picture.url }
+                Image { objectName: "later"; x: 128; width: 24; height: 24 }
             }
         )", QUrl("file:///DragPictureTest.qml"));
         std::unique_ptr<QObject> root(component.create());
@@ -579,33 +580,38 @@ private slots:
         auto *red = root->findChild<QQuickItem *>("red");
         auto *green = root->findChild<QQuickItem *>("green");
         auto *preview = root->findChild<QQuickItem *>("preview");
-        QVERIFY(picture && red && green && preview);
+        auto *later = root->findChild<QQuickItem *>("later");
+        QVERIFY(picture && red && green && preview && later);
         QSignalSpy ready(picture, &DragPicture::ready);
-        const auto shown = [&] {
+        const auto shown = [&](QQuickItem *image) {
             // grabWindow returns physical pixels, including at high DPI.
             const auto frame = window->grabWindow();
-            const QPointF at = preview->mapToScene(QPointF(12, 12)) * window->devicePixelRatio();
+            const QPointF at = image->mapToScene(QPointF(12, 12)) * window->devicePixelRatio();
             return frame.isNull() ? QColor() : frame.pixelColor(at.toPoint());
         };
         QVERIFY(picture->capture(red));
         QTRY_COMPARE(ready.count(), 1);
         const QUrl first = picture->url();
         QVERIFY(!first.isEmpty());
-        QTRY_COMPARE(shown(), QColor(Qt::red));
+        QTRY_COMPARE(shown(preview), QColor(Qt::red));
         // The URL must stay usable after QML's garbage collection, until
         // another capture replaces it, rather than referring to freed data.
+        // Release the first consumer's pixels before collecting, then load
+        // the saved URL in an initially empty Image.
+        QVERIFY(preview->setProperty("source", QUrl()));
         engine.collectGarbage();
-        window->update();
-        QTRY_COMPARE(shown(), QColor(Qt::red));
+        QVERIFY(later->setProperty("source", first));
+        QTRY_COMPARE(shown(later), QColor(Qt::red));
+        QVERIFY(later->setProperty("source", QUrl()));
         ready.clear();
         QVERIFY(picture->capture(red));
         QVERIFY(picture->capture(green));
         QTRY_COMPARE(ready.count(), 1);
         QVERIFY(picture->url() != first);
-        QTRY_COMPARE(shown(), QColor(Qt::green));
+        QTRY_COMPARE(shown(preview), QColor(Qt::green));
         QVERIFY(!picture->capture(nullptr));
         QCOMPARE(ready.count(), 1);
-        QTRY_COMPARE(shown(), QColor(Qt::green));
+        QTRY_COMPARE(shown(preview), QColor(Qt::green));
     }
 
     void dragPicturesAllowPendingItemsAndWindowsToDisappear()
