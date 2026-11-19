@@ -1,4 +1,5 @@
 import QtQuick
+import Folio 1.0
 import QtQuick.Layouts
 import QtQuick.Effects
 import "Format.js" as Format
@@ -187,11 +188,16 @@ Item {
         }
     }
 
-    HoverHandler {
-        id: hover
+    DragPicture {
+        id: dragPicture
         // Cleared first: Qt (6.12) reloads a new picture at the size of the
         // one before, which for a grab only warns ("Ignoring sourceSize").
-        onHoveredChanged: if (hovered) row.grabToImage(result => { row.Drag.imageSource = ""; row.Drag.imageSource = result.url })
+        onReady: { row.Drag.imageSource = ""; row.Drag.imageSource = url }
+    }
+
+    HoverHandler {
+        id: hover
+        onHoveredChanged: if (hovered) dragPicture.capture(row)
     }
     TapHandler {
         id: tap

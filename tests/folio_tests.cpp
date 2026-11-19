@@ -50,6 +50,7 @@
 #include "backend.h"
 #include "chooser.h"
 #include "disks.h"
+#include "dragpicture.h"
 #include "fileops.h"
 #include "foldermodel.h"
 #include "mounter.h"
@@ -549,9 +550,160 @@ class FolioTests : public QObject {
 private slots:
     void initTestCase()
     {
+        qmlRegisterType<DragPicture>("Folio", 1, 0, "DragPicture");
         // No test ever reaches the real udisks, which would change real disks.
         fakeDisks({});
         Backend::setSettingsFile(settings.filePath("folio.conf"));
+    }
+
+    void dragPicturesKeepTheLatestImage()
+    {
+        QQmlEngine engine;
+        QQmlComponent component(&engine);
+        component.setData(R"(
+            import QtQuick
+            import Folio 1.0
+            Window {
+                width: 160; height: 64; visible: true
+                DragPicture { id: picture; objectName: "picture" }
+                Rectangle { objectName: "red"; width: 24; height: 24; color: "red" }
+                Rectangle { objectName: "green"; x: 32; width: 24; height: 24; color: "lime" }
+                Image { objectName: "preview"; x: 96; width: 24; height: 24; source: picture.url }
+            }
+        )", QUrl("file:///DragPictureTest.qml"));
+        std::unique_ptr<QObject> root(component.create());
+        QVERIFY2(root, qPrintable(component.errorString()));
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *picture = root->findChild<DragPicture *>("picture");
+        auto *red = root->findChild<QQuickItem *>("red");
+        auto *green = root->findChild<QQuickItem *>("green");
+        auto *preview = root->findChild<QQuickItem *>("preview");
+        QVERIFY(picture && red && green && preview);
+        QSignalSpy ready(picture, &DragPicture::ready);
+        const auto shown = [&] {
+            // grabWindow returns physical pixels, including at high DPI.
+            const auto frame = window->grabWindow();
+            const QPointF at = preview->mapToScene(QPointF(12, 12)) * window->devicePixelRatio();
+            return frame.isNull() ? QColor() : frame.pixelColor(at.toPoint());
+        };
+        QVERIFY(picture->capture(red));
+        QTRY_COMPARE(ready.count(), 1);
+        const QUrl first = picture->url();
+        QVERIFY(!first.isEmpty());
+        QTRY_COMPARE(shown(), QColor(Qt::red));
+        // The URL must stay usable after QML's garbage collection, until
+        // another capture replaces it, rather than referring to freed data.
+        engine.collectGarbage();
+        window->update();
+        QTRY_COMPARE(shown(), QColor(Qt::red));
+        ready.clear();
+        QVERIFY(picture->capture(red));
+        QVERIFY(picture->capture(green));
+        QTRY_COMPARE(ready.count(), 1);
+        QVERIFY(picture->url() != first);
+        QTRY_COMPARE(shown(), QColor(Qt::green));
+        QVERIFY(!picture->capture(nullptr));
+        QCOMPARE(ready.count(), 1);
+        QTRY_COMPARE(shown(), QColor(Qt::green));
+    }
+
+    void dragPicturesAllowPendingItemsAndWindowsToDisappear()
+    {
+        QQmlEngine engine;
+        QQmlComponent component(&engine);
+        component.setData(R"(
+            import QtQuick
+            import Folio 1.0
+            Window {
+                width: 64; height: 64; visible: true
+                DragPicture { objectName: "picture" }
+                Rectangle { objectName: "source"; width: 24; height: 24; color: "red" }
+            }
+        )", QUrl("file:///PendingDragPictureTest.qml"));
+        // Destroy a source while its snapshot is queued, then the whole
+        // window with one queued. No reply may reach a discarded delegate.
+        for (int i = 0; i < 12; ++i) {
+            std::unique_ptr<QObject> root(component.create());
+            QVERIFY2(root, qPrintable(component.errorString()));
+            auto *window = qobject_cast<QQuickWindow *>(root.get());
+            QVERIFY(QTest::qWaitForWindowExposed(window));
+            auto *picture = root->findChild<DragPicture *>("picture");
+            auto *source = root->findChild<QQuickItem *>("source");
+            QVERIFY(picture && source);
+            QSignalSpy ready(picture, &DragPicture::ready);
+            QVERIFY(picture->capture(source));
+            if (i % 2 == 0) {
+                delete source;
+                // A rendered frame is the boundary for the pending grab.
+                QSignalSpy frame(window, &QQuickWindow::frameSwapped);
+                window->update();
+                QTRY_VERIFY(!frame.isEmpty());
+                QCOMPARE(ready.count(), 0);
+            } else {
+                QPointer<DragPicture> closing(picture);
+                root.reset();
+                QVERIFY(closing.isNull());
+                QCoreApplication::processEvents();
+            }
+        }
+    }
+
+    void fileDelegatesPrepareDragPictures_data()
+    {
+        QTest::addColumn<QString>("delegate");
+        QTest::newRow("list-and-columns") << QString("FileRow");
+        QTest::newRow("grid") << QString("FileTile");
+    }
+
+    void fileDelegatesPrepareDragPictures()
+    {
+        QFETCH(QString, delegate);
+        QTemporaryDir home;
+        Backend backend(home.path());
+        Theme theme(home.filePath("theme"));
+        FileOps fileOps;
+        Translator translator(home.filePath("language"), sourceFolder() + "/i18n");
+        Thumbnails thumbnails(home.filePath("cache"), {home.filePath("none")});
+        QQmlEngine engine;
+        engine.rootContext()->setContextProperty("backend", &backend);
+        engine.rootContext()->setContextProperty("theme", &theme);
+        engine.rootContext()->setContextProperty("fileOps", &fileOps);
+        engine.rootContext()->setContextProperty("translator", &translator);
+        engine.addImageProvider("thumb", new ThumbnailProvider(&thumbnails));
+        QQmlComponent component(&engine);
+        component.setData(QString(R"(
+            import QtQuick
+            Window {
+                width: 640; height: 240; visible: true
+                %1 {
+                    id: entry; objectName: "entry"; width: 300; y: 20; height: %3
+                    index: 0; name: "notes.txt"; path: "/notes.txt"; isDir: false
+                    kind: "text"; mime: "text/plain"; extension: "TXT"
+                    size: 1; modified: new Date(0); itemCount: -1; icon: ""; selected: false
+                    %2
+                }
+                function pictureUrl() { return String(entry.Drag.imageSource) }
+            }
+        )").arg(delegate, delegate == "FileRow" ? "depth: 0; expanded: false" : "",
+               delegate == "FileRow" ? "32" : "160").toUtf8(),
+                          QUrl::fromLocalFile(sourceFolder() + "/DelegateDragPictureTest.qml"));
+        std::unique_ptr<QObject> root(component.create());
+        QVERIFY2(root, qPrintable(component.errorString()));
+        auto *window = qobject_cast<QQuickWindow *>(root.get());
+        QVERIFY(QTest::qWaitForWindowExposed(window));
+        auto *entry = root->findChild<QQuickItem *>("entry");
+        QVERIFY(entry);
+        // Move out and back in: the real hover handler must precompute the
+        // picture and hand its still-live URL to Qt's drag machinery.
+        QTest::mouseMove(window, QPoint(600, 220));
+        QTest::mouseMove(window, entry->mapToScene(QPointF(100, 16)).toPoint());
+        QVariant url;
+        QTRY_VERIFY((QMetaObject::invokeMethod(root.get(), "pictureUrl", Q_RETURN_ARG(QVariant, url)),
+                     !url.toString().isEmpty()));
+        auto *picture = entry->findChild<DragPicture *>();
+        QVERIFY(picture);
+        QCOMPARE(QUrl(url.toString()), picture->url());
     }
 
     void foldersRememberTheirOrderAndPassItDown()

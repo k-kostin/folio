@@ -1,4 +1,5 @@
 import QtQuick
+import Folio 1.0
 import QtQuick.Shapes
 import QtQuick.Effects
 import "Format.js" as Format
@@ -119,13 +120,18 @@ Item {
         onDropped: (drop) => { fileOps.dropInto(drop.urls, tile.path); drop.accept(Qt.MoveAction) }
     }
 
+    DragPicture {
+        id: dragPicture
+        // Cleared first: Qt (6.12) reloads a new picture at the size of the
+        // one before, which for a grab only warns ("Ignoring sourceSize").
+        onReady: { tile.Drag.imageSource = ""; tile.Drag.imageSource = url }
+    }
+
     HoverHandler {
         id: hover
         // The picture that follows the pointer while dragging; taken ahead
         // of time because a drag can't wait for it.
-        // Cleared first: Qt (6.12) reloads a new picture at the size of the
-        // one before, which for a grab only warns ("Ignoring sourceSize").
-        onHoveredChanged: if (hovered) art.grabToImage(result => { tile.Drag.imageSource = ""; tile.Drag.imageSource = result.url })
+        onHoveredChanged: if (hovered) dragPicture.capture(art)
     }
 
     // Dragging hands the file to whatever it lands on as a URI list: the
