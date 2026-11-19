@@ -8078,8 +8078,14 @@ private slots:
         QVERIFY(image);
         QTRY_COMPARE(image->property("status").toInt(), 1);
         const QString original = row->property("path").toString();
+        f.eval(row, "Drag.imageSource = Qt.resolvedUrl(path); Drag.mimeData = {'text/uri-list': fileOps.uriList([path])}");
+        QCOMPARE(f.eval(row, "Object.keys(Drag.mimeData).length").toInt(), 1);
+        QVERIFY(!f.eval(row, "String(Drag.imageSource)").toString().isEmpty());
+        QVERIFY2(f.error.isEmpty(), qPrintable(f.error));
         f.move(120);
         QTRY_VERIFY(row && row->property("pooled").toBool());
+        QCOMPARE(f.eval(row, "Object.keys(Drag.mimeData).length").toInt(), 0);
+        QCOMPARE(f.eval(row, "String(Drag.imageSource)").toString(), QString());
         QTRY_VERIFY2(image->property("source").toUrl().isEmpty(), "Pooled thumbnail source was not cleared");
         for (auto *handler : row->findChildren<QObject *>())
             if (handler->inherits("QQuickHoverHandler"))
@@ -8103,13 +8109,14 @@ private slots:
             QString::fromLatin1(QUrl::toPercentEncoding(picture))));
         const auto frame = f.window()->grabWindow();
         const QPoint at =
-            image->mapToItem(f.window()->contentItem(), QPointF(image->width() / 2, image->height() / 2))
-                .toPoint();
+            (image->mapToItem(f.window()->contentItem(), QPointF(image->width() / 2, image->height() / 2)) *
+             f.window()->devicePixelRatio()).toPoint();
         QVERIFY(frame.rect().contains(at));
         const int number = QFileInfo(picture).completeBaseName().mid(4).toInt();
         QCOMPARE(frame.pixelColor(at).rgb(), QColor(number % 2 ? Qt::blue : Qt::red).rgb());
         QVERIFY(seek("text"));
         QTRY_VERIFY(image->property("source").toUrl().isEmpty());
+        QVERIFY2(f.error.isEmpty(), qPrintable(f.error));
     }
 
     void listReuseKeepsTreeState_data()
@@ -8136,12 +8143,22 @@ private slots:
         f.move(qMax(0, row->property("index").toInt() - 4));
         auto *arrow = rowArrow(row);
         QVERIFY(arrow);
+        QQuickItem *glyph = nullptr;
+        for (auto *item : arrow->childItems())
+            if (item->property("name").isValid())
+                glyph = item;
+        QVERIFY(glyph);
+        QVERIFY(glyph->isVisible());
+        QCOMPARE(glyph->property("name").toString(), mirrored ? QString("back") : QString("forward"));
+        QCOMPARE(glyph->rotation(), 0.0);
         const QString reused = row->property("path").toString();
         const QPoint at =
             arrow->mapToItem(f.window()->contentItem(), QPointF(arrow->width() / 2, arrow->height() / 2))
                 .toPoint();
         rowClickAt(f.window(), at, 2000);
         QTRY_VERIFY(row->property("expanded").toBool());
+        QTRY_COMPARE(glyph->rotation(), mirrored ? -90.0 : 90.0);
+        QVERIFY(glyph->isVisible());
         auto *folder = f.backend.folder();
         QTRY_VERIFY(folder->indexOfPath(reused + "/nested") >= 0);
         const int childIndex = folder->indexOfPath(reused + "/nested");
@@ -8170,6 +8187,8 @@ private slots:
         QTRY_COMPARE(f.item(folder->indexOfPath(reused + "/nested/leaf.txt"))->property("depth").toInt(), 2);
         rowClickAt(f.window(), at, 2800);
         QTRY_VERIFY(!row->property("expanded").toBool());
+        QTRY_COMPARE(glyph->rotation(), 0.0);
+        QVERIFY(glyph->isVisible());
         QTRY_VERIFY(folder->indexOfPath(reused + "/nested") == -1);
         QVERIFY(folder->get(folder->indexOfPath(original)).value("expanded").toBool());
         f.move(120);
@@ -8287,6 +8306,13 @@ private slots:
             if (entry.value("expanded").toBool())
                 QCOMPARE(entry.value("path").toString(), target);
         }
+        // Returning to the same file must not revive its interrupted press.
+        QTest::mousePress(f.window(), Qt::LeftButton, Qt::NoModifier, at, 1);
+        f.eval(row, "ListView.pooled()");
+        f.eval(row, "ListView.reused()");
+        QTest::mouseRelease(f.window(), Qt::LeftButton, Qt::NoModifier, at, 1);
+        QVERIFY(f.backend.folder()->get(f.backend.folder()->indexOfPath(target)).value("expanded").toBool());
+        QVERIFY2(f.error.isEmpty(), qPrintable(f.error));
     }
 
     void rowDragPicturesIgnorePreviousFiles()
