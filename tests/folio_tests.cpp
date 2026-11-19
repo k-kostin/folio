@@ -31,6 +31,8 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QQmlExpression>
+#include <QQmlProperty>
 #include <QQmlPropertyMap>
 #include <QQuickItem>
 #include <QQuickWindow>
@@ -563,10 +565,177 @@ static ChooserRequest chooserRequest(ChooserRequest::Mode mode, const QVariantMa
     return ChooserRequest::read(mode, "Pick", overDBus(options), error);
 }
 
+// Only opening another program is fenced. The folder, selection and file
+// operations exercised by the QML are the real ones.
+class RowTestBackend : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(FolderModel *folder READ folder CONSTANT)
+    Q_PROPERTY(QString path READ path NOTIFY pathChanged)
+  public:
+    explicit RowTestBackend(const QString &home) : backend(home)
+    {
+        connect(&backend, &Backend::pathChanged, this, &RowTestBackend::pathChanged);
+    }
+    FolderModel *folder() { return backend.folder(); }
+    QString path() const { return backend.path(); }
+    QStringList opened;
+    Q_INVOKABLE void open(const QString &path) { opened << path; }
+    Q_INVOKABLE void navigate(const QString &path) { backend.navigate(path); }
+    Q_INVOKABLE void goUp() { backend.goUp(); }
+  signals:
+    void pathChanged();
+
+  private:
+    Backend backend;
+};
+
+struct RowLocaleGuard {
+    QLocale before;
+    ~RowLocaleGuard() { QLocale::setDefault(before); }
+};
+
+class RowList {
+    static void makeFile(const QString &path)
+    {
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly) || file.write("x") != 1)
+            qFatal("Cannot write row fixture");
+    }
+
+  public:
+    RowLocaleGuard locale;
+    QTemporaryDir home;
+    RowTestBackend backend{home.path()};
+    Theme theme{home.filePath("theme")};
+    FileOps ops;
+    Translator translator{home.filePath("language"), sourceFolder() + "/i18n"};
+    std::unique_ptr<QQmlPropertyMap> plugins{QQmlPropertyMap::create()};
+    Thumbnails thumbnails{home.filePath("cache"), {home.filePath("none")}};
+    QQmlEngine engine;
+    std::unique_ptr<QObject> root;
+    QQuickItem *list = nullptr;
+    QString error;
+
+    RowList(bool pictures = false, bool tree = false)
+    {
+        if (!home.isValid())
+            qFatal("temporary home unavailable");
+        QDir().mkpath(folder());
+        for (int i = 0; i < 400; ++i) {
+            const QString file = folder() + QString("/file%1").arg(i, 3, 10, QChar('0'));
+            if (pictures && i % 3 == 0) {
+                QImage image(32, 32, QImage::Format_RGB32);
+                image.fill(i % 2 ? Qt::blue : Qt::red);
+                if (!image.save(file + ".png"))
+                    qFatal("picture fixture");
+            } else
+                makeFile(file + ".txt");
+        }
+        if (tree)
+            for (int i = 0; i < 200; ++i) {
+                const QString dir = folder() + QString("/branch%1").arg(i, 3, 10, QChar('0'));
+                if (!QDir().mkpath(dir + "/nested"))
+                    qFatal("tree fixture");
+                makeFile(dir + "/a.txt");
+                makeFile(dir + "/nested/leaf.txt");
+            }
+        plugins->insert("views", QVariantMap{});
+        auto *context = engine.rootContext();
+        context->setContextProperty("backend", &backend);
+        context->setContextProperty("theme", &theme);
+        context->setContextProperty("fileOps", &ops);
+        context->setContextProperty("translator", &translator);
+        context->setContextProperty("plugins", plugins.get());
+        engine.addImageProvider("thumb", new ThumbnailProvider(&thumbnails));
+    }
+    ~RowList()
+    {
+        root.reset();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QThreadPool::globalInstance()->waitForDone();
+    }
+    QString folder() const { return home.filePath("folder"); }
+    QQuickWindow *window() const { return qobject_cast<QQuickWindow *>(root.get()); }
+    bool show(bool mirrored = false)
+    {
+        backend.navigate(folder());
+        if (!QTest::qWaitFor([&] { return !backend.folder()->loading(); }))
+            return false;
+        QQmlComponent component(&engine);
+        component.setData("import QtQuick\nWindow { width: 900; height: 480; visible: true\n"
+                          " Item { anchors.fill: parent; LayoutMirroring.enabled: " +
+                              QByteArray(mirrored ? "true" : "false") +
+                              "; LayoutMirroring.childrenInherit: true; FolderList { objectName: 'list'; "
+                              "anchors.fill: parent } } }",
+                          QUrl::fromLocalFile(sourceFolder() + "/RowReuseTest.qml"));
+        root.reset(component.create());
+        error = component.errorString();
+        if (!root)
+            return false;
+        list = root->findChild<QQuickItem *>("list");
+        return list && QTest::qWaitForWindowExposed(window()) &&
+               QTest::qWaitFor([&] { return item(4) != nullptr; });
+    }
+    QQuickItem *item(int index) const
+    {
+        QQuickItem *found = nullptr;
+        QMetaObject::invokeMethod(list, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, found), Q_ARG(int, index));
+        return found;
+    }
+    void move(int index)
+    {
+        QMetaObject::invokeMethod(list, "positionViewAtIndex", Q_ARG(int, index), Q_ARG(int, 0));
+        QMetaObject::invokeMethod(list, "forceLayout");
+    }
+    QVariant eval(QObject *object, const QString &code)
+    {
+        QQmlExpression expression(qmlContext(object), object, code);
+        QVariant result = expression.evaluate();
+        if (expression.hasError())
+            error = expression.error().toString();
+        return result;
+    }
+    QPoint point(QQuickItem *item) const
+    {
+        return item->mapToItem(window()->contentItem(), QPointF(100, item->height() / 2)).toPoint();
+    }
+};
+
+static void rowMouseAt(QQuickWindow *window, const QPoint &at, bool down, ulong timestamp)
+{
+    QMouseEvent event(down ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease, at,
+                      window->mapToGlobal(at), Qt::LeftButton, down ? Qt::LeftButton : Qt::NoButton,
+                      Qt::NoModifier);
+    event.setTimestamp(timestamp);
+    QGuiApplication::sendEvent(window, &event);
+}
+
+static void rowClickAt(QQuickWindow *window, const QPoint &at, ulong timestamp)
+{
+    rowMouseAt(window, at, true, timestamp);
+    rowMouseAt(window, at, false, timestamp + 1);
+}
+
 class FolioTests : public QObject {
     Q_OBJECT
     // Where the tests' folders keep their orders, away from the real ones.
     QTemporaryDir settings;
+
+    static QQuickItem *rowImage(QQuickItem *row)
+    {
+        for (auto *item : row->findChildren<QQuickItem *>())
+            if (item->inherits("QQuickImage") &&
+                item->property("source").toUrl().toString().startsWith("image://thumb/"))
+                return item;
+        return nullptr;
+    }
+    static QQuickItem *rowArrow(QQuickItem *row)
+    {
+        for (auto *item : row->findChildren<QQuickItem *>())
+            if (item->implicitWidth() == 18 && item->implicitHeight() == 32)
+                return item;
+        return nullptr;
+    }
 
 private slots:
     void initTestCase()
@@ -7887,6 +8056,305 @@ private slots:
         QTest::keyClick(window, Qt::Key_PageDown, Qt::ShiftModifier);
         QCOMPARE(root->property("cursor").toInt(), 2 * paged);
         QCOMPARE(backend.folder()->selectedCount(), 2 * paged + 1);
+    }
+
+    // Recycling a row must preserve file identity, including its image and
+    // the new tree roles; folders can change while their delegates are pooled.
+    void listReuseKeepsThumbnails_data()
+    {
+        QTest::addColumn<bool>("mirrored");
+        QTest::newRow("ltr") << false;
+        QTest::newRow("rtl") << true;
+    }
+
+    void listReuseKeepsThumbnails()
+    {
+        QFETCH(bool, mirrored);
+        RowList f(true);
+        QVERIFY2(f.show(mirrored), qPrintable(f.error));
+        QPointer<QQuickItem> row = f.item(3);
+        QVERIFY(row);
+        auto *image = rowImage(row);
+        QVERIFY(image);
+        QTRY_COMPARE(image->property("status").toInt(), 1);
+        const QString original = row->property("path").toString();
+        f.move(120);
+        QTRY_VERIFY(row && row->property("pooled").toBool());
+        QTRY_VERIFY2(image->property("source").toUrl().isEmpty(), "Pooled thumbnail source was not cleared");
+        for (auto *handler : row->findChildren<QObject *>())
+            if (handler->inherits("QQuickHoverHandler"))
+                QVERIFY(!handler->property("enabled").toBool());
+        int step = 0;
+        const auto seek = [&](const QString &kind) {
+            for (int tries = 0; tries < 20; ++tries) {
+                f.move((++step * 47 + 192) % 360);
+                QCoreApplication::processEvents();
+                if (row && !row->property("pooled").toBool() && row->property("path").toString() != original &&
+                    row->property("kind") == kind)
+                    return true;
+            }
+            return false;
+        };
+        QVERIFY(seek("image"));
+        const QString picture = row->property("path").toString();
+        f.move(qMax(0, row->property("index").toInt() - 4));
+        QTRY_COMPARE(image->property("status").toInt(), 1);
+        QVERIFY(image->property("source").toUrl().toString().contains(
+            QString::fromLatin1(QUrl::toPercentEncoding(picture))));
+        const auto frame = f.window()->grabWindow();
+        const QPoint at =
+            image->mapToItem(f.window()->contentItem(), QPointF(image->width() / 2, image->height() / 2))
+                .toPoint();
+        QVERIFY(frame.rect().contains(at));
+        const int number = QFileInfo(picture).completeBaseName().mid(4).toInt();
+        QCOMPARE(frame.pixelColor(at).rgb(), QColor(number % 2 ? Qt::blue : Qt::red).rgb());
+        QVERIFY(seek("text"));
+        QTRY_VERIFY(image->property("source").toUrl().isEmpty());
+    }
+
+    void listReuseKeepsTreeState_data()
+    {
+        QTest::addColumn<bool>("mirrored");
+        QTest::newRow("ltr") << false;
+        QTest::newRow("rtl") << true;
+    }
+
+    void listReuseKeepsTreeState()
+    {
+        QFETCH(bool, mirrored);
+        RowList f(false, true);
+        QVERIFY2(f.show(mirrored), qPrintable(f.error));
+        QPointer<QQuickItem> row = f.item(4);
+        const QString original = row->property("path").toString();
+        f.move(120);
+        QTRY_VERIFY(row && row->property("pooled").toBool());
+        auto *model = f.backend.folder();
+        model->setExpanded(model->indexOfPath(original), true);
+        QTRY_VERIFY(model->indexOfPath(original + "/nested") >= 0);
+        f.move(40);
+        QTRY_VERIFY(row && row->property("path").toString() != original && row->property("isDir").toBool());
+        f.move(qMax(0, row->property("index").toInt() - 4));
+        auto *arrow = rowArrow(row);
+        QVERIFY(arrow);
+        const QString reused = row->property("path").toString();
+        const QPoint at =
+            arrow->mapToItem(f.window()->contentItem(), QPointF(arrow->width() / 2, arrow->height() / 2))
+                .toPoint();
+        rowClickAt(f.window(), at, 2000);
+        QTRY_VERIFY(row->property("expanded").toBool());
+        auto *folder = f.backend.folder();
+        QTRY_VERIFY(folder->indexOfPath(reused + "/nested") >= 0);
+        const int childIndex = folder->indexOfPath(reused + "/nested");
+        QTRY_VERIFY(f.item(childIndex));
+        QTRY_COMPARE(f.item(childIndex)->property("path").toString(), reused + "/nested");
+        auto *child = f.item(childIndex);
+        QTRY_COMPARE(child->property("depth").toInt(), 1);
+        QQuickItem *layout = nullptr;
+        for (auto *item : child->childItems())
+            if (item->inherits("QQuickRowLayout"))
+                layout = item;
+        QVERIFY(layout);
+        QCOMPARE(QQmlProperty(layout, "anchors.leftMargin").read().toReal(), 24.0);
+        auto *childArrow = rowArrow(child);
+        QVERIFY(childArrow);
+        const QPoint childAt =
+            childArrow
+                ->mapToItem(f.window()->contentItem(), QPointF(childArrow->width() / 2, childArrow->height() / 2))
+                .toPoint();
+        rowClickAt(f.window(), childAt, 2400);
+        QTRY_VERIFY(child->property("expanded").toBool());
+        QTRY_VERIFY(folder->indexOfPath(reused + "/nested/leaf.txt") >= 0);
+        QTRY_VERIFY(f.item(folder->indexOfPath(reused + "/nested/leaf.txt")));
+        QTRY_COMPARE(f.item(folder->indexOfPath(reused + "/nested/leaf.txt"))->property("path").toString(),
+                     reused + "/nested/leaf.txt");
+        QTRY_COMPARE(f.item(folder->indexOfPath(reused + "/nested/leaf.txt"))->property("depth").toInt(), 2);
+        rowClickAt(f.window(), at, 2800);
+        QTRY_VERIFY(!row->property("expanded").toBool());
+        QTRY_VERIFY(folder->indexOfPath(reused + "/nested") == -1);
+        QVERIFY(folder->get(folder->indexOfPath(original)).value("expanded").toBool());
+        f.move(120);
+        folder->setExpanded(folder->indexOfPath(original), false);
+        QTRY_VERIFY(folder->indexOfPath(original + "/nested") == -1);
+        f.move(0);
+        QTRY_VERIFY(f.item(folder->indexOfPath(original)));
+        QTRY_COMPARE(f.item(folder->indexOfPath(original))->property("path").toString(), original);
+        QTRY_VERIFY(!f.item(folder->indexOfPath(original))->property("expanded").toBool());
+        QVERIFY(f.backend.opened.isEmpty());
+    }
+
+    void listReuseKeepsClicks_data()
+    {
+        QTest::addColumn<bool>("mirrored");
+        QTest::newRow("ltr") << false;
+        QTest::newRow("rtl") << true;
+    }
+
+    void listReuseKeepsClicks()
+    {
+        QFETCH(bool, mirrored);
+
+        RowList f;
+        QVERIFY2(f.show(mirrored), qPrintable(f.error));
+        QPointer<QQuickItem> row = f.item(4);
+        const QString original = row->property("path").toString();
+        const QPoint at = f.point(row);
+        rowClickAt(f.window(), at, 1000);
+        QCOMPARE(f.backend.folder()->selectedPaths(), QStringList{original});
+        // Another row becomes current, making the first one reusable.
+        f.list->setProperty("currentIndex", -1);
+        f.move(120);
+        f.move(240);
+        QTRY_VERIFY(row && row->property("path").toString() != original);
+        f.move(row->property("index").toInt() - 4);
+        QTRY_COMPARE(f.point(row), at);
+        const QString reused = row->property("path").toString();
+        rowClickAt(f.window(), at, 1100);
+        QCOMPARE(f.backend.folder()->selectedPaths(), QStringList{reused});
+        QVERIFY2(f.backend.opened.isEmpty(), "First click on the new file activated it");
+        rowClickAt(f.window(), at, 1150);
+        QCOMPARE(f.backend.opened, QStringList{reused});
+        // Releasing a press after the delegate changed cannot click its new file.
+        f.list->setProperty("currentIndex", -1);
+        f.move(0);
+        const auto selected = f.backend.folder()->selectedPaths();
+        rowMouseAt(f.window(), f.point(f.item(4)), true, 2000);
+        f.move(120);
+        f.move(240);
+        rowMouseAt(f.window(), at, false, 2001);
+        QCOMPARE(f.backend.folder()->selectedPaths(), selected);
+        QCOMPARE(f.backend.opened, QStringList{reused});
+        // A drag keeps its file identity and restores reuse when it ends.
+        f.move(0);
+        f.list->setProperty("currentIndex", 4);
+        QPointer<QQuickItem> drag = f.item(4);
+        const QString dragPath = drag->property("path").toString();
+        f.eval(drag, "Drag.dragType = Drag.Internal; Drag.active = true");
+        QVERIFY(!f.list->property("reuseItems").toBool());
+        f.move(120);
+        f.move(240);
+        QVERIFY(!drag || drag->property("path").toString() == dragPath);
+        if (drag)
+            f.eval(drag, "Drag.active = false");
+        QTRY_VERIFY(f.list->property("reuseItems").toBool());
+        QVERIFY2(f.error.isEmpty(), qPrintable(f.error));
+        f.move(0);
+        QPointer<QQuickItem> closing = f.item(4);
+        QVERIFY(f.eval(closing, "captureDragPicture()").toBool());
+        f.root.reset();
+        QVERIFY(!closing);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    }
+
+    void listReuseCancelsArrowPress_data()
+    {
+        QTest::addColumn<bool>("mirrored");
+        QTest::newRow("ltr") << false;
+        QTest::newRow("rtl") << true;
+    }
+
+    void listReuseCancelsArrowPress()
+    {
+        QFETCH(bool, mirrored);
+        RowList f(false, true);
+        QVERIFY2(f.show(mirrored), qPrintable(f.error));
+        QPointer<QQuickItem> row = f.item(4);
+        const QString original = row->property("path").toString();
+        auto *arrow = rowArrow(row);
+        QVERIFY(arrow);
+        const QPoint at =
+            arrow->mapToItem(f.window()->contentItem(), QPointF(arrow->width() / 2, arrow->height() / 2))
+                .toPoint();
+        QTest::mousePress(f.window(), Qt::LeftButton, Qt::NoModifier, at, 1);
+        for (int index = 0; index < f.backend.folder()->count(); ++index)
+            QVERIFY(!f.backend.folder()->get(index).value("expanded").toBool());
+        f.move(120);
+        f.move(40);
+        {
+            QTRY_VERIFY(row && row->property("path").toString() != original && row->property("isDir").toBool());
+            f.move(qMax(0, row->property("index").toInt() - 4));
+        }
+        for (int index = 0; index < f.backend.folder()->count(); ++index)
+            QVERIFY(!f.backend.folder()->get(index).value("expanded").toBool());
+        QTest::mouseRelease(f.window(), Qt::LeftButton, Qt::NoModifier, at, 1);
+        for (int index = 0; index < f.backend.folder()->count(); ++index)
+            QVERIFY(!f.backend.folder()->get(index).value("expanded").toBool());
+        QVERIFY(f.backend.opened.isEmpty());
+        const QString target = row->property("path").toString();
+        QTest::mouseClick(f.window(), Qt::LeftButton, Qt::NoModifier, at, 1);
+        QTRY_VERIFY(f.backend.folder()->get(f.backend.folder()->indexOfPath(target)).value("expanded").toBool());
+        for (int index = 0; index < f.backend.folder()->count(); ++index) {
+            const auto entry = f.backend.folder()->get(index);
+            if (entry.value("expanded").toBool())
+                QCOMPARE(entry.value("path").toString(), target);
+        }
+    }
+
+    void rowDragPicturesIgnorePreviousFiles()
+    {
+        RowList f;
+        QQmlComponent component(&f.engine);
+        component.setData(R"(import QtQuick
+    Window {
+        id: host
+        width: 900; height: 480; visible: true
+        property var callbacks: []
+        function take() { return callbacks.shift() }
+        function clear() { callbacks = [] }
+        FileRow {
+            objectName: "row"; width: 900
+            depth: 0; expanded: false; index: 0; name: "a"; path: "/a"; isDir: false; kind: "text"; mime: "text/plain"
+            extension: "TXT"; size: 1; modified: new Date(0); itemCount: -1; icon: ""; selected: false
+            function grabToImage(callback) { host.callbacks.push(callback); return true }
+            function pool() { ListView.pooled() }
+            function reuse() { ListView.reused() }
+        }
+    })",
+                          QUrl::fromLocalFile(sourceFolder() + "/DelayedRowTest.qml"));
+        std::unique_ptr<QObject> root(component.create());
+        QVERIFY2(root, qPrintable(component.errorString()));
+        QPointer<QObject> row = root->findChild<QObject *>("row");
+        QVERIFY(row);
+        // This test delivers replies explicitly, independent of the mouse.
+        for (auto *handler : row->findChildren<QObject *>())
+            if (handler->inherits("QQuickHoverHandler"))
+                handler->setProperty("enabled", false);
+        QVERIFY(QMetaObject::invokeMethod(root.get(), "clear"));
+        QVERIFY(f.eval(row, "captureDragPicture()").toBool());
+        QVariant callback;
+        QVERIFY(QMetaObject::invokeMethod(root.get(), "take", Q_RETURN_ARG(QVariant, callback)));
+        QJSValue old = callback.value<QJSValue>();
+        QVERIFY(old.isCallable());
+        f.eval(row, "pool()");
+        row->setProperty("path", "/b");
+        f.eval(row, "reuse()");
+        f.eval(row, "pool()");
+        row->setProperty("path", "/a");
+        f.eval(row, "reuse()");
+        const QString dragFile = f.home.filePath("drag.png");
+        QImage pixels(16, 16, QImage::Format_RGB32);
+        pixels.fill(Qt::red);
+        QVERIFY(pixels.save(dragFile));
+        const QString pictureUrl = QUrl::fromLocalFile(dragFile).toString();
+        QJSValue picture = f.engine.newObject();
+        picture.setProperty("url", pictureUrl);
+        QVERIFY(!old.call({picture}).isError());
+        QCOMPARE(f.eval(row, "String(Drag.imageSource)").toString(), QString());
+        // The current request still succeeds: rejecting stale ones must not
+        // disable drag pictures altogether.
+        QVERIFY(f.eval(row, "captureDragPicture()").toBool());
+        QVERIFY(QMetaObject::invokeMethod(root.get(), "take", Q_RETURN_ARG(QVariant, callback)));
+        QJSValue current = callback.value<QJSValue>();
+        QVERIFY(current.isCallable());
+        QVERIFY(!current.call({picture}).isError());
+        QCOMPARE(f.eval(row, "String(Drag.imageSource)").toString(), pictureUrl);
+        QVERIFY(f.eval(row, "captureDragPicture()").toBool());
+        QVERIFY(QMetaObject::invokeMethod(root.get(), "take", Q_RETURN_ARG(QVariant, callback)));
+        QJSValue pending = callback.value<QJSValue>();
+        QVERIFY(pending.isCallable());
+        root.reset();
+        QVERIFY(row.isNull());
+        QVERIFY(!pending.call({picture}).isError());
+        QVERIFY2(f.error.isEmpty(), qPrintable(f.error));
     }
 
     // The list's keys for its tree, as the Finder's: → opens a folder in
