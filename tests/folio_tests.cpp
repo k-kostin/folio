@@ -623,13 +623,16 @@ private slots:
             import Folio 1.0
             Window {
                 width: 64; height: 64; visible: true
-                DragPicture { objectName: "picture" }
-                Rectangle { objectName: "source"; width: 24; height: 24; color: "red" }
+                Item {
+                    objectName: "delegate"; anchors.fill: parent
+                    DragPicture { objectName: "picture" }
+                    Rectangle { objectName: "source"; width: 24; height: 24; color: "red" }
+                }
             }
         )", QUrl("file:///PendingDragPictureTest.qml"));
-        // Destroy a source while its snapshot is queued, then the whole
-        // window with one queued. No reply may reach a discarded delegate.
-        for (int i = 0; i < 12; ++i) {
+        // Remove just the source, the delegate and its helper while the
+        // window keeps rendering, or the whole window, with a grab queued.
+        for (int i = 0; i < 18; ++i) {
             std::unique_ptr<QObject> root(component.create());
             QVERIFY2(root, qPrintable(component.errorString()));
             auto *window = qobject_cast<QQuickWindow *>(root.get());
@@ -639,18 +642,30 @@ private slots:
             QVERIFY(picture && source);
             QSignalSpy ready(picture, &DragPicture::ready);
             QVERIFY(picture->capture(source));
-            if (i % 2 == 0) {
-                delete source;
+            if (i % 3 == 2) {
+                QPointer<DragPicture> closing(picture);
+                root.reset();
+                QVERIFY(closing.isNull());
+                QCoreApplication::processEvents();
+            } else {
+                if (i % 3 == 0) {
+                    delete source;
+                } else {
+                    // Scrolling away removes the source and helper while
+                    // their window stays open to finish the pending capture.
+                    QPointer<DragPicture> removedPicture(picture);
+                    QPointer<QQuickItem> removedSource(source);
+                    auto *delegate = root->findChild<QQuickItem *>("delegate");
+                    QVERIFY(delegate);
+                    delete delegate;
+                    QVERIFY(removedPicture.isNull());
+                    QVERIFY(removedSource.isNull());
+                }
                 // A rendered frame is the boundary for the pending grab.
                 QSignalSpy frame(window, &QQuickWindow::frameSwapped);
                 window->update();
                 QTRY_VERIFY(!frame.isEmpty());
                 QCOMPARE(ready.count(), 0);
-            } else {
-                QPointer<DragPicture> closing(picture);
-                root.reset();
-                QVERIFY(closing.isNull());
-                QCoreApplication::processEvents();
             }
         }
     }
