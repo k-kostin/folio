@@ -72,10 +72,9 @@ FileListView {
         onTapped: (point) => list.contextMenu(selecting.menuAt(point), backend.path, point.scenePosition)
     }
 
-    // Keep an active drag on its original file, following the existing
-    // non-reusing behavior until it ends.
-    property Item dragSource: null
-    reuseItems: dragSource === null
+    // Rows scrolled out are given to the files scrolled in rather than made
+    // anew: scrolling a long list costs a fraction of what it did.
+    reuseItems: true
     focus: true
     keyNavigationEnabled: true
     // No cursor of its own to start with: the pane puts it back where the
@@ -85,11 +84,6 @@ FileListView {
     model: backend.folder
 
     delegate: FileRow {
-        id: entry
-        Drag.onActiveChanged: {
-            if (Drag.active) list.dragSource = entry
-            else if (list.dragSource === entry) list.dragSource = null
-        }
         width: list.width
         detailed: true
         tree: backend.folder.expandable
