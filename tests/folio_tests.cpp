@@ -7242,8 +7242,16 @@ private slots:
         QCOMPARE(free(120'000'000'000), QLocale("ar_EG").toString(120.0, 'f', 1) + " GB free");
     }
 
+    void thumbnailsCachedImagesDoNotWaitForGenerators_data()
+    {
+        QTest::addColumn<bool>("preview");
+        QTest::newRow("tile") << false;
+        QTest::newRow("cached-preview") << true;
+    }
+
     void thumbnailsCachedImagesDoNotWaitForGenerators()
     {
+        QFETCH(bool, preview);
         QTemporaryDir dir;
         const QString release = dir.filePath("release");
         QImage frame(64, 32, QImage::Format_RGB32);
@@ -7295,11 +7303,13 @@ private slots:
         QQmlComponent image(&engine);
         image.setData("import QtQuick\nImage { asynchronous: true; cache: false }", QUrl());
         QVERIFY2(image.isReady(), qPrintable(image.errorString()));
+        const QString id = preview ? "cached/64/32/0/" : "256/0/image%2Fpng/";
         std::unique_ptr<QObject> warm(image.createWithInitialProperties({
-            {"source", QUrl("image://thumb/256/0/image%2Fpng/" + QUrl::toPercentEncoding(photo))}}));
+            {"source", QUrl("image://thumb/" + id + QUrl::toPercentEncoding(photo))}}));
         QVERIFY(warm);
         QTRY_COMPARE_WITH_TIMEOUT(warm->property("status").toInt(), 1, 500);
-        QVERIFY(warm->property("implicitWidth").toInt() > 0);
+        QCOMPARE(warm->property("implicitWidth").toInt(), 64);
+        QCOMPARE(warm->property("implicitHeight").toInt(), 32);
         warm.reset(); // The forwarding provider must not outlive the real one.
         engine.removeImageProvider("thumb");
         // Queued misses cancelled before a generator is available must finish
