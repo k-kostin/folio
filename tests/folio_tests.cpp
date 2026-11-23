@@ -1364,6 +1364,43 @@ private slots:
         QCOMPARE(names(QLocale("en_US")), QStringList({"åsa.txt", "zeta.txt"}));
     }
 
+    void folderMimeTypesPreserveSpecialFilesAndLinks()
+    {
+        // A filesystem socket name must fit in sockaddr_un, even with a long TMPDIR.
+        QTemporaryDir dir("/tmp/folio-mime-XXXXXX");
+        QVERIFY(dir.isValid());
+        const QStringList names{"Makefile", "no-extension", "archive.tar.gz", "PHOTO.JPG",
+                                "data.json", "page.pdf", "unusual.weird-extension", ".hidden.txt",
+                                "a spaced ünicode.txt", "unreadable.txt"};
+        for (const QString &name : names)
+            write(dir.filePath(name), "sample\n");
+        QVERIFY(QFile::setPermissions(dir.filePath("unreadable.txt"), {}));
+        QVERIFY(QDir(dir.path()).mkdir("directory.pdf"));
+        QVERIFY(QFile::link(dir.filePath("PHOTO.JPG"), dir.filePath("file-link.txt")));
+        QVERIFY(QFile::link(dir.filePath("directory.pdf"), dir.filePath("directory-link.txt")));
+        QVERIFY(::symlink("missing", QFile::encodeName(dir.filePath("broken-link.txt")).constData()) == 0);
+        QVERIFY(::mkfifo(QFile::encodeName(dir.filePath("fifo.txt")).constData(), 0600) == 0);
+        QLocalServer server;
+        QVERIFY(server.listen(dir.filePath("socket.txt")));
+
+        QString error;
+        const auto entries = FolderModel::list(dir.path(), true, "name", &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(entries.size(), names.size() + 6);
+        const QMimeDatabase types;
+        QHash<QString, QString> mime;
+        for (const auto &entry : entries) {
+            const QFileInfo info(entry.path);
+            const QString expected = types.mimeTypeForFile(info, QMimeDatabase::MatchExtension).name();
+            QCOMPARE(entry.mime, expected);
+            QCOMPARE(entry.kind, FolderModel::kindForMime(expected));
+            mime.insert(entry.name, entry.mime);
+        }
+        QCOMPARE(mime.value("fifo.txt"), QString("inode/fifo"));
+        QCOMPARE(mime.value("socket.txt"), QString("inode/socket"));
+        QCOMPARE(mime.value("directory-link.txt"), QString("inode/directory"));
+    }
+
     void folderReportsMissingFolders()
     {
         QString error;

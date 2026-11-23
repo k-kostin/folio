@@ -384,8 +384,12 @@ FolderModel::Entry FolderModel::entryFor(const QFileInfo &info, const QMimeDatab
     e.isDir = info.isDir();
     e.size = e.isDir ? 0 : info.size();
     e.modified = info.lastModified();
+    // The QFileInfo overload stats native paths again to recognize special
+    // inodes. The metadata already read above suffices for regular files.
     e.mime = e.isDir ? QStringLiteral("inode/directory")
-                     : mimes.mimeTypeForFile(info, QMimeDatabase::MatchExtension).name();
+                     : info.isFile() && !info.isSymLink()
+                         ? mimes.mimeTypeForFile(e.path, QMimeDatabase::MatchExtension).name()
+                         : mimes.mimeTypeForFile(info, QMimeDatabase::MatchExtension).name();
     e.kind = kindForMime(e.mime);
     e.extension = e.isDir ? QString() : info.suffix().toUpper();
     return e;
