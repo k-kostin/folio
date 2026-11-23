@@ -7331,8 +7331,8 @@ private slots:
         QTemporaryDir dir;
         const QString clip = dir.filePath("clip.mp4");
         write(clip, "clip");
-        write(dir.filePath("slow.thumbnailer"), "[Thumbnailer Entry]\nExec=/bin/sh -c 'echo ran > \""
-              + dir.filePath("ran").toUtf8() + "\"'\nMimeType=video/mp4;\n");
+        write(dir.filePath("slow.thumbnailer"), "[Thumbnailer Entry]\nExec=/bin/touch \""
+              + dir.filePath("ran").toUtf8() + "\"\nMimeType=video/mp4;\n");
         Thumbnails thumbnails(dir.filePath("cache"), {dir.path()});
         auto provider = std::make_unique<ThumbnailProvider>(&thumbnails);
         auto *response = provider->requestImageResponse("cached/0/video%2Fmp4/" + QUrl::toPercentEncoding(clip), {});
