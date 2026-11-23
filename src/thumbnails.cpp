@@ -132,7 +132,8 @@ bool run(QProcess &process, const QString &program, const QStringList &args, int
     QDeadlineTimer deadline(patience);
     bool finished = false;
     while (!isCancelled(cancelled) && !deadline.hasExpired()) {
-        if (process.waitForFinished(int(qMin<qint64>(100, deadline.remainingTime())))) {
+        const int slice = deadline.isForever() ? 100 : int(qMin<qint64>(100, deadline.remainingTime()));
+        if (process.waitForFinished(slice)) {
             finished = true;
             break;
         }

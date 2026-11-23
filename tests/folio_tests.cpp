@@ -7378,9 +7378,9 @@ private slots:
         frame.fill(Qt::green);
         QVERIFY(frame.save(dir.filePath("frame.png")));
         // One slow thumbnail per worker, like leaving a folder whose visible tiles are still loading.
-        write(dir.filePath("render"), "#!/bin/sh\nprintf started > \"$1.started\"\n"
-              "case \"${1##*/}\" in slow*) exec /usr/bin/sleep 2.5;; esac\ncp \""
-              + dir.filePath("frame.png").toUtf8() + "\" \"$2\"\n");
+        write(dir.filePath("render"), "#!/bin/sh\ncp \"" + dir.filePath("frame.png").toUtf8()
+              + "\" \"$2\" || exit 1\nprintf started > \"$1.started\"\n"
+                "case \"${1##*/}\" in slow*) exec /usr/bin/sleep 2.5;; esac\n");
         write(dir.filePath("test.thumbnailer"), "[Thumbnailer Entry]\nExec=/bin/sh \""
               + dir.filePath("render").toUtf8() + "\" %i %o\nMimeType=video/mp4;\n");
         // Exercise Poppler's fallback through the same cancellable helper.
@@ -7393,7 +7393,7 @@ private slots:
             QVERIFY(QFile::setPermissions(poppler, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
             qputenv("PATH", QFile::encodeName(dir.path()) + ':' + oldPath);
         }
-        Thumbnails thumbnails(dir.filePath("cache"), {dir.path()});
+        Thumbnails thumbnails(dir.filePath("cache"), {dir.path()}, {}, route == "pdf" ? -1 : 15000);
         QStringList files;
         {
             QQmlEngine engine;
@@ -7428,9 +7428,10 @@ private slots:
             // Its image is ready without waiting for the discarded folder's 2.5-second jobs.
             QTRY_COMPARE_WITH_TIMEOUT(images.first()->property("status").toInt(), 1, 1000);
             QCOMPARE(images.first()->property("implicitWidth").toInt(), 64);
+            QCOMPARE(images.first()->property("implicitHeight").toInt(), 32);
         }
         for (const auto &path : files) {
-            QVERIFY(!QFile::exists(dir.filePath("cache/normal/" + Thumbnails::cacheKey(path))));
+            QVERIFY(thumbnails.cached(path).isNull());
             QVERIFY(!QFile::exists(dir.filePath("cache/fail/folio/" + Thumbnails::cacheKey(path))));
         }
     }
