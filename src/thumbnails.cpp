@@ -30,6 +30,11 @@
 
 namespace {
 
+bool isCancelled(const std::atomic_bool *cancelled) {
+    return cancelled && *cancelled;
+}
+
+
 QString fileUri(const QString &path) {
     return QUrl::fromLocalFile(path).toString(QUrl::FullyEncoded);
 }
@@ -118,10 +123,6 @@ QStringList expandCommand(const QString &command, const QString &input, const QS
 // group of its own, so that past `patience` milliseconds what it started
 // (glycin and the office thumbnailer start their own) is stopped with it:
 // a broken file must never hang a tile forever.
-bool isCancelled(const std::atomic_bool *cancelled) {
-    return cancelled && *cancelled;
-}
-
 bool run(QProcess &process, const QString &program, const QStringList &args, int patience,
          const std::atomic_bool *cancelled) {
     if (isCancelled(cancelled))

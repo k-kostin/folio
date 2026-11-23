@@ -6,6 +6,7 @@
 #include <QQuickAsyncImageProvider>
 #include <QStringList>
 #include <QThreadPool>
+#include <atomic>
 #include <mutex>
 
 // Thumbnails per the freedesktop thumbnail spec: one shared cache under
