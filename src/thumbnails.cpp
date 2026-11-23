@@ -582,8 +582,9 @@ class ThumbnailResponse : public QQuickImageResponse {
 public:
     ThumbnailResponse(const Thumbnails *thumbnails, const QString &id) : m_thumbnails(thumbnails), m_id(id) {}
 
-    void readCache(QThreadPool *generators) {
+    void readCache(QThreadPool *generators, bool &told) {
         if (m_cancelled) {
+            told = true;
             complete();
             return;
         }
@@ -593,22 +594,27 @@ public:
             m_image = m_thumbnails->cached(path, qBound(64, parts.at(0).toInt(), 1024));
         }
         if (m_cancelled || !m_image.isNull()) {
+            told = true;
             complete();
             return;
         }
         // This is the last access to the response from the cache task: the
         // generation task may finish and Qt may delete it immediately.
         generators->start([this] { run(); });
+        told = true;
     }
 
-    void run() {
+    void run(QThreadPool *generators = nullptr) {
         // A decoder that throws (LibRaw on a camera RAW it can't read, #164)
         // must not take Folio down: an exception out of a pool thread ends
         // the process. The file gets no thumbnail instead; once finished()
         // has been told, the response may be gone, so it's left alone.
         bool told = false;
         try {
-            work(told);
+            if (generators)
+                readCache(generators, told);
+            else
+                work(told);
         } catch (...) {
             if (!told) {
                 m_image = QImage();
@@ -668,7 +674,7 @@ public:
             const QString path = QUrl::fromPercentEncoding(parts.mid(5).join('/').toUtf8());
             m_image = Thumbnails::textPage(path, qBound(64, parts.at(1).toInt(), 1024),
                                            QColor::fromString("#" + parts.at(3)), QColor::fromString("#" + parts.at(4)));
-        } else if (!m_cancelled && parts.size() >= 4) {
+        } else if (!m_cancelled && parts.size() >= 4 && parts.at(0) != "cached") {
             const int size = qBound(64, parts.at(0).toInt(), 1024);
             const QString mime = QUrl::fromPercentEncoding(parts.at(2).toUtf8());
             const QString path = QUrl::fromPercentEncoding(parts.mid(3).join('/').toUtf8());
@@ -742,6 +748,6 @@ QQuickImageResponse *ThumbnailProvider::requestImageResponse(const QString &id, 
     else if (id.startsWith(QLatin1String("page/")) || id.startsWith(QLatin1String("sharp/")))
         m_pool.start([response] { response->run(); }, id.startsWith(QLatin1String("sharp/")) ? 1 : 0);
     else
-        m_cachePool.start([response, generators = &m_pool] { response->readCache(generators); });
+        m_cachePool.start([response, generators = &m_pool] { response->run(generators); });
     return response;
 }

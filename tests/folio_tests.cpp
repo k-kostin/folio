@@ -7264,7 +7264,8 @@ private slots:
         write(dir.filePath("slow.thumbnailer"), "[Thumbnailer Entry]\nExec=/bin/sh \""
               + dir.filePath("render").toUtf8() + "\" %i %o\nMimeType=video/mp4;\n");
         Thumbnails thumbnails(dir.filePath("cache"), {dir.path()});
-        QVERIFY(!thumbnails.load(photo, "image/png", 256).isNull());
+        const QSize tileSize = thumbnails.load(photo, "image/png", 256).size();
+        QVERIFY(!tileSize.isEmpty());
         auto provider = std::make_unique<ThumbnailProvider>(&thumbnails);
         QList<QQuickImageResponse *> responses;
         const auto cleanup = qScopeGuard([&] {
@@ -7308,8 +7309,9 @@ private slots:
             {"source", QUrl("image://thumb/" + id + QUrl::toPercentEncoding(photo))}}));
         QVERIFY(warm);
         QTRY_COMPARE_WITH_TIMEOUT(warm->property("status").toInt(), 1, 500);
-        QCOMPARE(warm->property("implicitWidth").toInt(), 64);
-        QCOMPARE(warm->property("implicitHeight").toInt(), 32);
+        const QSize expected = preview ? frame.size() : tileSize;
+        QCOMPARE(warm->property("implicitWidth").toInt(), expected.width());
+        QCOMPARE(warm->property("implicitHeight").toInt(), expected.height());
         warm.reset(); // The forwarding provider must not outlive the real one.
         engine.removeImageProvider("thumb");
         // Queued misses cancelled before a generator is available must finish
@@ -7322,6 +7324,24 @@ private slots:
         provider.reset(); // Drains both stages, including cancelled responses.
         QVERIFY(!QFile::exists(queued + ".started"));
         QVERIFY(!QFile::exists(dir.filePath("cache/fail/folio/" + Thumbnails::cacheKey(queued))));
+    }
+
+    void thumbnailsIncompletePreviewsNeverGenerate()
+    {
+        QTemporaryDir dir;
+        const QString clip = dir.filePath("clip.mp4");
+        write(clip, "clip");
+        write(dir.filePath("slow.thumbnailer"), "[Thumbnailer Entry]\nExec=/bin/sh -c 'echo ran > \""
+              + dir.filePath("ran").toUtf8() + "\"'\nMimeType=video/mp4;\n");
+        Thumbnails thumbnails(dir.filePath("cache"), {dir.path()});
+        auto provider = std::make_unique<ThumbnailProvider>(&thumbnails);
+        auto *response = provider->requestImageResponse("cached/0/video%2Fmp4/" + QUrl::toPercentEncoding(clip), {});
+        // Finish may precede a signal subscription; drain first, then inspect.
+        provider.reset();
+        std::unique_ptr<QQuickImageResponse> owned(response);
+        QVERIFY(!response->errorString().isEmpty());
+        QVERIFY(!QFile::exists(dir.filePath("ran")));
+        QVERIFY(!QFile::exists(dir.filePath("cache/fail/folio/" + Thumbnails::cacheKey(clip))));
     }
 
     void thumbnailsCacheLookupNeverGeneratesOrReturnsStalePictures()
